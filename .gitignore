@@ -157,5 +157,8 @@ app.db-journal
 # Local configuration
 .env.local
 
+# Backend secrets
+backend/client_secret.json
+
 # WhatsApp Gateway session data
 whatsapp_gateway/user_sessions/

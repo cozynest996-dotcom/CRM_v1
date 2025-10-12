@@ -1,0 +1,168 @@
+/* 基础样式 */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* 加载动画 */
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* 工作流节点样式 */
+.react-flow__node {
+  transition: all 0.3s ease;
+}
+
+.node-executing {
+  animation: pulse 1.5s infinite;
+  box-shadow: 0 0 20px rgba(66, 153, 225, 0.5);
+}
+
+.node-executing::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: -5px;
+  right: -5px;
+  bottom: -5px;
+  border-radius: 10px;
+  background: linear-gradient(45deg, #4299e1, #805ad5);
+  opacity: 0.2;
+  z-index: -1;
+  animation: glow 1.5s infinite alternate;
+}
+
+.node-status {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid white;
+  transition: all 0.3s ease;
+}
+
+.node-status.waiting {
+  background-color: #ed8936;
+  animation: blink 1s infinite;
+}
+
+.node-status.received {
+  background-color: #48bb78;
+}
+
+.node-status.error {
+  background-color: #e53e3e;
+}
+
+.node-status-text {
+  position: absolute;
+  top: -30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 10;
+}
+
+/* 工作流连线样式 */
+.react-flow__edge {
+  transition: stroke-width 0.3s ease;
+}
+
+.react-flow__edge:hover {
+  stroke-width: 3;
+}
+
+.react-flow__edge.animated {
+  stroke-dasharray: 5;
+  animation: flowAnimation 1s infinite linear;
+}
+
+.react-flow__edge-path {
+  stroke: #64748b;
+  stroke-width: 2;
+}
+
+.react-flow__edge.executing .react-flow__edge-path {
+  stroke: #4299e1;
+  stroke-width: 3;
+  filter: drop-shadow(0 0 3px rgba(66, 153, 225, 0.5));
+}
+
+.react-flow__connection-line {
+  stroke: #4299e1;
+  stroke-width: 2;
+  stroke-dasharray: 5;
+  animation: flowAnimation 1s infinite linear;
+}
+
+/* 工作流控件样式 */
+.react-flow__controls {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: white;
+  border: none;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 8px;
+  color: #4a5568;
+}
+
+.react-flow__controls-button:hover {
+  background: #f7fafc;
+}
+
+/* 动画定义 */
+@keyframes pulse {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes glow {
+  from {
+    opacity: 0.2;
+  }
+  to {
+    opacity: 0.4;
+  }
+}
+
+@keyframes blink {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes flowAnimation {
+  from {
+    stroke-dashoffset: 10;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+

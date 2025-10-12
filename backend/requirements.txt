@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+requests
+psycopg2-binary==2.9.9
+pydantic-settings
+cryptography
+openai
+python-multipart
+alembic
+pytz
+PyJWT
+telethon
+google-auth-oauthlib
+google-api-python-client

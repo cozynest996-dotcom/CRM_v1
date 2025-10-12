@@ -1,0 +1,21 @@
+{
+    "name": "whatsapp_gateway",
+    "version": "0.0.1",
+    "private": true,
+    "scripts": {
+        "start": "node index.js",
+        "dev": "nodemon --watch . --ext js,json --signal SIGUSR2 index.js"
+    },
+    "dependencies": {
+        "@adiwajshing/baileys": "^5.0.0",
+        "express": "^5.1.0",
+        "jsonwebtoken": "^9.0.2",
+        "node-fetch": "^3.3.2",
+        "qrcode-terminal": "^0.12.0",
+        "whatsapp-web.js": "^1.34.1"
+    },
+    "devDependencies": {
+        "nodemon": "^2.0.22"
+    },
+    "type": "module"
+}

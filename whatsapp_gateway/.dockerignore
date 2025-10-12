@@ -1,0 +1,8 @@
+user_sessions/
+node_modules/
+*.session
+*.ldb
+*.dat
+*.log
+.DS_Store
+.env

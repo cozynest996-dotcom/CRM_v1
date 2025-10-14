@@ -233,6 +233,11 @@ function initClientForUser(userId) {
 
     // message / message_ack handlers remain the same as earlier
     client.on("message", async (msg) => {
+      // 检查是否是群组聊天
+      if (msg.from.endsWith('@g.us')) {
+        console.log(`🚫 忽略群组消息来自: ${msg.from}`);
+        return; // 忽略群组消息
+      }
       // existing message handler body
       const startTime = Date.now();
       console.log(`📩 ${startTime} - User ${userId} 收到WhatsApp消息:`, {
@@ -245,13 +250,43 @@ function initClientForUser(userId) {
         const contact = await msg.getContact();
         const name = contact.name || contact.pushname || "Unknown";
         console.log(`👤 User ${userId} 联系人信息:`, { name, phone: msg.from });
+        
+        // 获取聊天历史
+        let chatHistory = [];
+        try {
+          const chat = await msg.getChat();
+          if (chat && typeof chat.fetchMessages === 'function') {
+            // 获取最近20条消息（包括当前消息）
+            const messages = await chat.fetchMessages({ limit: 20 });
+            
+            // 格式化聊天历史，排除当前消息
+            chatHistory = messages
+              .filter(m => m.id.id !== msg.id.id) // 排除当前消息
+              .reverse() // 最早的消息在前
+              .map(m => ({
+                content: m.body,
+                direction: m.fromMe ? "outbound" : "inbound",
+                timestamp: new Date(m.timestamp * 1000).toISOString()
+              }));
+            
+            console.log(`📚 User ${userId} 获取到 ${chatHistory.length} 条聊天历史`);
+          }
+        } catch (historyError) {
+          console.error(`⚠️ User ${userId} 获取聊天历史失败:`, historyError);
+          chatHistory = []; // 失败时使用空数组
+        }
+        
         const inboxPayload = {
           phone: msg.from.replace("@c.us", ""),
           content: msg.body,
           name: name,
-          user_id: userId
+          user_id: userId,
+          chat_history: chatHistory // 新增聊天历史字段
         };
-        console.log("📤 推送消息到后端:", inboxPayload);
+        console.log("📤 推送消息到后端:", {
+          ...inboxPayload,
+          chat_history: `${chatHistory.length} messages` // 简化日志输出
+        });
         fetch("http://backend:8000/api/messages/inbox", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -305,9 +340,14 @@ function initClientForUser(userId) {
               });
               console.log(`✅ User ${userId} 头像已更新`);
             }
-            const seenSuccess = await markMessageAsSeen(msg, client);
-            if (seenSuccess) {
-              console.log(`✅ User ${userId} 消息已标记为已读`);
+            // 立即标记消息已读（无延迟）
+            try {
+              if (typeof msg.markSeen === 'function') {
+                await msg.markSeen();
+                console.log(`✅ User ${userId} 消息已标记已读`);
+              }
+            } catch (err) {
+              console.error(`❌ User ${userId} 标记消息已读失败:`, err);
             }
           } catch (err) {
             console.error(`❌ User ${userId} Error in background tasks:`, err);
@@ -441,55 +481,23 @@ function initClientForUser(userId) {
 
 // 旧的全局客户端事件处理 - 已移除，改用用户特定的客户端
 
-// 生成随机延迟时间（3-10秒）用于蓝勾默认延迟
-function getRandomDelay() {
-  return Math.floor(Math.random() * (10000 - 3000 + 1) + 3000); // 3000-10000ms
-}
-
-// 模拟真人操作：延迟标记消息为已读
-async function markMessageAsSeen(msg, clientInstance) {
-  if (!msg || !clientInstance) return;
-  
-  try {
-    // 随机延迟 3-10 秒后标记已读，默认更自然
-    const delay = getRandomDelay();
-    console.log(`⏳ 将在 ${delay/1000} 秒后标记消息已读...`);
-    await new Promise(resolve => setTimeout(resolve, delay));
-
-    // 方法1: 直接通过消息对象标记
-    if (typeof msg.markSeen === 'function') {
-      await msg.markSeen();
-      console.log(`✅ ${delay/1000}秒后标记消息已读`);
-      return true;
-    }
-
-    // 方法2: 通过 chat 发送 seen 作为回退
-    if (typeof clientInstance.getChatById === 'function') {
-      const chat = await clientInstance.getChatById(msg.from);
-      if (chat && typeof chat.sendSeen === 'function') {
-        await chat.sendSeen();
-        console.log(`✅ ${delay/1000}秒后标记会话已读`);
-        return true;
-      }
-    }
-
-    return false;
-  } catch (err) {
-    console.error('❌ Failed to mark message as seen:', err);
-    return false;
-  }
-}
+// 延迟逻辑已移至后端工作流节点配置
 
 // 旧的全局消息监听器已移除 - 现在每个用户客户端都有自己的监听器
 
 // ✅ 提供 /send API (需要身份驗證)
 app.post("/send", authenticateUser, async (req, res) => {
-  const { to, message, backend_message_id } = req.body;
+  const { to, message, backend_message_id, media_url, media_type } = req.body;
   const user_id = req.user_id; // 從 JWT token 獲取，確保隔離
   
   // 参数验证
-  if (!to || !message) {
-    return res.status(400).json({ error: "Missing required parameters: to, message" });
+  if (!to) {
+    return res.status(400).json({ error: "Missing required parameter: to" });
+  }
+  
+  // 如果既没有消息也没有媒体，则报错
+  if ((!message || message.trim() === '') && !media_url) {
+    return res.status(400).json({ error: "Missing required parameters: either message or media_url must be provided" });
   }
   
   // user_id 已從 JWT 獲得，一定存在
@@ -502,7 +510,11 @@ app.post("/send", authenticateUser, async (req, res) => {
   
   const client = userState.client;
   const chatId = `${to}@c.us`;
-  console.log(`📤 ${Date.now()} - User ${user_id} 收到发送请求:`, { to, message_length: message.length, backend_message_id });
+  const logData = { to, backend_message_id };
+  if (message) logData.message_length = message.length;
+  if (media_url) logData.media_url = media_url;
+  if (media_type) logData.media_type = media_type;
+  console.log(`📤 ${Date.now()} - User ${user_id} 收到发送请求:`, logData);
 
   // 立即返回202，后续异步处理
   res.status(202).json({ status: "accepted", message: "Message queued for sending" });
@@ -514,22 +526,76 @@ app.post("/send", authenticateUser, async (req, res) => {
       console.log(`💬 ${Date.now()} - User ${user_id} 获取会话信息...`);
       const chat = await client.getChatById(chatId);
       
-      // 2. 检查未读消息并标记已读
-      let seenDelay = 0;
+      // 2. 检查未读消息并标记已读（无延迟）
       if (chat && typeof chat.sendSeen === 'function') {
         const unreadCount = typeof chat.unreadCount === 'number' ? chat.unreadCount : null;
         if (unreadCount && unreadCount > 0) {
-          seenDelay = getRandomDelay();
-          console.log(`⏳ User ${user_id} 会话有 ${unreadCount} 条未读，将在 ${seenDelay/1000} 秒后标记已读`);
-          await new Promise(resolve => setTimeout(resolve, seenDelay));
+          console.log(`📖 User ${user_id} 会话有 ${unreadCount} 条未读，立即标记已读`);
           await chat.sendSeen();
           console.log(`✅ ${Date.now()} - User ${user_id} 已标记会话已读`);
         }
       }
 
       // 3. 发送消息
-      console.log(`📩 ${Date.now()} - User ${user_id} 开始发送消息...`);
-      const sent = await client.sendMessage(chatId, message);
+      let sent;
+      if (media_url && media_type) {
+        console.log(`📩 ${Date.now()} - User ${user_id} 开始发送媒体消息...`);
+        console.log(`📎 媒体URL: ${media_url}`);
+        console.log(`📎 媒体类型: ${media_type}`);
+        try {
+          // 导入 MessageMedia
+          const { MessageMedia } = pkg;
+          
+          console.log(`🔄 正在从URL创建媒体对象...`);
+          console.log(`🔗 URL 验证: ${media_url}`);
+          
+          // 验证 URL 格式
+          if (!media_url || !media_url.startsWith('http')) {
+            throw new Error(`无效的媒体URL: ${media_url}`);
+          }
+          
+          // 从 URL 创建媒体对象
+          const media = await MessageMedia.fromUrl(media_url);
+          
+          console.log(`✅ 媒体对象创建成功:`, {
+            mimetype: media.mimetype,
+            filename: media.filename,
+            data_length: media.data ? media.data.length : 0
+          });
+          
+          // 发送媒体消息，message 作为 caption
+          if (message && message.trim()) {
+            console.log(`📝 发送媒体附带文本: ${message}`);
+            sent = await client.sendMessage(chatId, media, { caption: message });
+          } else {
+            console.log(`📷 发送纯媒体消息`);
+            sent = await client.sendMessage(chatId, media);
+          }
+          
+          console.log(`✅ ${Date.now()} - User ${user_id} 媒体消息发送成功`);
+        } catch (mediaError) {
+          console.error(`❌ ${Date.now()} - User ${user_id} 媒体发送失败:`, {
+            error: mediaError.message,
+            stack: mediaError.stack,
+            media_url: media_url,
+            media_type: media_type,
+            error_name: mediaError.name,
+            error_code: mediaError.code
+          });
+          
+          // 如果媒体发送失败，回退到发送文本消息（如果有的话）
+          if (message && message.trim()) {
+            console.log(`📩 ${Date.now()} - User ${user_id} 回退到文本消息...`);
+            sent = await client.sendMessage(chatId, message);
+          } else {
+            throw new Error(`媒体发送失败且无文本消息可回退: ${mediaError.message}`);
+          }
+        }
+      } else {
+        console.log(`📩 ${Date.now()} - User ${user_id} 开始发送文本消息...`);
+        sent = await client.sendMessage(chatId, message);
+      }
+      
       const whatsappId = sent && sent.id ? (sent.id._serialized || sent.id.id || sent.id) : null;
       
       if (!whatsappId) {
@@ -564,7 +630,7 @@ app.post("/send", authenticateUser, async (req, res) => {
       }
 
       // 5. 如果之前标记了已读，发送webhook通知
-      if (seenDelay > 0 && backend_message_id) {
+      if (backend_message_id) {
         try {
           await fetch("http://backend:8000/api/messages/webhooks/whatsapp/seen", {
             method: "POST",
@@ -572,7 +638,7 @@ app.post("/send", authenticateUser, async (req, res) => {
             body: JSON.stringify({
               backend_message_id,
               whatsapp_id: whatsappId,
-              delay_ms: seenDelay,
+              delay_ms: 0, // 移除 seenDelay
               to,
               user_id: user_id  // 🔑 包含用户ID
             })

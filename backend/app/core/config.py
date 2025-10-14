@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     media_upload_dir: str = "./media_uploads"
 
     # Supabase 配置
-    supabase_url: str = ""
-    supabase_service_key: str = ""
-    supabase_anon_key: str = ""
-    supabase_bucket: str = "media"
+    SUPABASE_URL: str
+    SUPABASE_SERVICE_KEY: str
+    SUPABASE_ANON_KEY: str = ""
+    SUPABASE_BUCKET: str = "media"
 
     # 管理员配置
     admin_emails: str = "mingkun1999@gmail.com"  # 逗号分隔多个管理员邮箱

@@ -23,6 +23,7 @@ interface NodeConfigProps {
 
 export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps) {
   const [showVariableSelector, setShowVariableSelector] = useState<{show: boolean, position?: string}>({ show: false })
+  const [showMediaSelector, setShowMediaSelector] = useState<{show: boolean, position?: string}>({ show: false })
   const [localData, setLocalData] = useState<any>(node.data || {})
   const [showPromptPreview, setShowPromptPreview] = useState(false)
   const [compiledPromptText, setCompiledPromptText] = useState<string>('')
@@ -30,6 +31,11 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const [availableHeaders, setAvailableHeaders] = useState<string[] | null>(null)
   const [loadingHeaders, setLoadingHeaders] = useState(false)
   const [customerStages, setCustomerStages] = useState<any[]>([]) // 新增客户阶段状态
+  const [mediaList, setMediaList] = useState<any[]>([])
+  const [folderList, setFolderList] = useState<any[]>([])
+  const [loadingMedia, setLoadingMedia] = useState(false)
+  const [expandedFolder, setExpandedFolder] = useState<string | null>(null)
+  const [folderMediaList, setFolderMediaList] = useState<any[]>([])
 
   async function fetchAvailableHeaders() {
     // 如果已有字段且非空，则不用重复请求；如果为空数组则仍尝试重新获取（可能之前未认证或无数据，刷新后可能有变化）
@@ -69,6 +75,34 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       setAvailableHeaders([])
     } finally {
       setLoadingHeaders(false)
+    }
+  }
+
+  async function fetchMediaData() {
+    if (loadingMedia) return
+    setLoadingMedia(true)
+    try {
+      const response = await api.get('/api/media')
+      console.log('fetched media data:', response)
+      setMediaList(response.media || [])
+      setFolderList(response.folders || [])
+    } catch (e) {
+      console.error('failed to fetch media data', e)
+      setMediaList([])
+      setFolderList([])
+    } finally {
+      setLoadingMedia(false)
+    }
+  }
+
+  async function fetchFolderMedia(folderName: string) {
+    try {
+      const response = await api.get(`/api/media?folder=${encodeURIComponent(folderName)}`)
+      console.log('fetched folder media:', response)
+      setFolderMediaList(response.media || [])
+    } catch (e) {
+      console.error('failed to fetch folder media', e)
+      setFolderMediaList([])
     }
   }
   
@@ -166,6 +200,16 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             >
               @变量
             </button>
+            <button
+              className="small-action-button"
+              onClick={() => {
+                setShowMediaSelector({ show: true, position: 'system_prompt' })
+                fetchMediaData()
+              }}
+              style={{ marginLeft: '8px' }}
+            >
+              📷媒体
+            </button>
           </div>
         </div>
       </div>
@@ -187,6 +231,16 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               onClick={() => setShowVariableSelector({ show: true, position: 'user_prompt' })}
             >
               @变量
+            </button>
+            <button
+              className="small-action-button"
+              onClick={() => {
+                setShowMediaSelector({ show: true, position: 'user_prompt' })
+                fetchMediaData()
+              }}
+              style={{ marginLeft: '8px' }}
+            >
+              📷媒体
             </button>
           </div>
         </div>
@@ -244,6 +298,90 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       </div>
 
       <div className="config-field">
+        <label>媒体发送设置</label>
+        <div style={{ marginTop: '8px' }}>
+          <div style={{ marginBottom: '8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+              <input
+                type="checkbox"
+                checked={localData.media_settings?.send_media_separately || false}
+                onChange={(e) => updateNodeData({
+                  media_settings: {
+                    ...localData.media_settings,
+                    send_media_separately: e.target.checked
+                  }
+                })}
+                style={{ marginRight: '8px' }}
+              />
+              媒体与文本分开发送
+            </label>
+            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+              勾选后，媒体文件将单独发送，不附带文本消息
+            </div>
+          </div>
+          
+          <div style={{ marginBottom: '8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+              <input
+                type="checkbox"
+                checked={localData.media_settings?.send_with_caption || true}
+                onChange={(e) => updateNodeData({
+                  media_settings: {
+                    ...localData.media_settings,
+                    send_with_caption: e.target.checked
+                  }
+                })}
+                style={{ marginRight: '8px' }}
+                disabled={localData.media_settings?.send_media_separately}
+              />
+              媒体附带文本说明
+            </label>
+            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+              媒体文件将与 AI 生成的回复文本一起发送
+            </div>
+          </div>
+
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+              <input
+                type="checkbox"
+                checked={localData.media_settings?.delay_between_media || false}
+                onChange={(e) => updateNodeData({
+                  media_settings: {
+                    ...localData.media_settings,
+                    delay_between_media: e.target.checked
+                  }
+                })}
+                style={{ marginRight: '8px' }}
+              />
+              媒体间延迟发送
+            </label>
+            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+              发送多个媒体文件时，在每个文件之间添加延迟
+            </div>
+            {localData.media_settings?.delay_between_media && (
+              <div style={{ marginLeft: '24px', marginTop: '8px' }}>
+                <label style={{ fontSize: '12px', color: '#666' }}>延迟时间（秒）:</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={localData.media_settings?.delay_seconds || 2}
+                  onChange={(e) => updateNodeData({
+                    media_settings: {
+                      ...localData.media_settings,
+                      delay_seconds: parseInt(e.target.value)
+                    }
+                  })}
+                  style={{ marginLeft: '8px', width: '60px' }}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="config-field">
         <button
           onClick={() => {
             const compiled = compilePromptForPreview()
@@ -254,6 +392,106 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         >
           预览完整 Prompt
         </button>
+      </div>
+
+      {/* 聊天历史配置 */}
+      <div className="config-field">
+        <label>聊天历史设置</label>
+        <div style={{ marginTop: '8px' }}>
+          <div style={{ marginBottom: '8px' }}>
+            <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+              <input
+                type="checkbox"
+                checked={localData.chat_history?.enabled || false}
+                onChange={(e) => updateNodeData({
+                  chat_history: {
+                    ...localData.chat_history,
+                    enabled: e.target.checked
+                  }
+                })}
+                style={{ marginRight: '8px' }}
+              />
+              启用聊天历史
+              <span style={{ fontSize: '16px', cursor: 'help', marginLeft: '8px' }} title="将客户的聊天历史记录传递给 AI，帮助 AI 更好地理解上下文">
+                ℹ️
+              </span>
+            </label>
+            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+              将客户的聊天历史记录传递给 AI，帮助 AI 更好地理解上下文
+            </div>
+          </div>
+
+          {localData.chat_history?.enabled && (
+            <>
+              <div style={{ marginBottom: '8px', marginLeft: '24px' }}>
+                <label style={{ fontSize: '12px', color: '#666' }}>历史记录条数:</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={localData.chat_history?.message_count || 10}
+                  onChange={(e) => updateNodeData({
+                    chat_history: {
+                      ...localData.chat_history,
+                      message_count: parseInt(e.target.value)
+                    }
+                  })}
+                  style={{ width: '80px', marginLeft: '8px' }}
+                />
+                <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                  获取最近的 N 条聊天记录（包括客户和 AI 的消息）
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '8px', marginLeft: '24px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', fontSize: '12px' }}>
+                  <input
+                    type="checkbox"
+                    checked={localData.chat_history?.include_timestamps || false}
+                    onChange={(e) => updateNodeData({
+                      chat_history: {
+                        ...localData.chat_history,
+                        include_timestamps: e.target.checked
+                      }
+                    })}
+                    style={{ marginRight: '8px' }}
+                  />
+                  包含时间戳
+                </label>
+                <div style={{ fontSize: '11px', color: '#999', marginTop: '2px' }}>
+                  在聊天历史中包含消息的发送时间
+                </div>
+              </div>
+
+              <div style={{ marginLeft: '24px' }}>
+                <label style={{ fontSize: '12px', color: '#666' }}>历史记录格式预览:</label>
+                <div style={{ 
+                  padding: '8px', 
+                  backgroundColor: '#f8f9fa', 
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontFamily: 'monospace',
+                  color: '#495057',
+                  marginTop: '4px'
+                }}>
+                  {localData.chat_history?.include_timestamps ? (
+                    <>
+                      [2024-10-14 10:30] 客户: 你好，我想了解一下房价<br/>
+                      [2024-10-14 10:31] AI: 您好！我很乐意为您介绍...<br/>
+                      [2024-10-14 10:32] 客户: 有什么优惠吗？
+                    </>
+                  ) : (
+                    <>
+                      客户: 你好，我想了解一下房价<br/>
+                      AI: 您好！我很乐意为您介绍...<br/>
+                      客户: 有什么优惠吗？
+                    </>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="config-field">
@@ -693,19 +931,92 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         </div>
       )}
 
+      {/* 智能延迟配置 */}
       <div className="config-field">
-        <label>发送前延迟 (秒)</label>
-        <input
-          type="number"
-          min="0"
-          value={localData.delay_seconds || 0}
-          onChange={(e) => updateNodeData({ delay_seconds: parseInt(e.target.value) })}
-          placeholder="0 表示不延迟"
-        />
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <input
+            type="checkbox"
+            checked={localData.enable_smart_delay || false}
+            onChange={(e) => updateNodeData({ enable_smart_delay: e.target.checked })}
+          />
+          启用智能延迟
+          <span style={{ fontSize: '16px', cursor: 'help' }} title="根据消息长度智能计算发送延迟时间，模拟真人打字速度">
+            ℹ️
+          </span>
+        </label>
         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          消息发送前等待的秒数，可用于模拟"已读"或根据文字长度自动延迟。
+          根据消息长度自动计算延迟时间，模拟真人打字和阅读速度
         </div>
       </div>
+
+      {localData.enable_smart_delay && (
+        <>
+          <div className="config-field">
+            <label>基础延迟 (秒)</label>
+            <input
+              type="number"
+              min="0"
+              max="30"
+              step="0.1"
+              value={localData.base_delay || 1}
+              onChange={(e) => updateNodeData({ base_delay: parseFloat(e.target.value) })}
+              placeholder="1"
+            />
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              每条消息的基础延迟时间（秒）
+            </div>
+          </div>
+
+          <div className="config-field">
+            <label>每字符延迟 (毫秒)</label>
+            <input
+              type="number"
+              min="0"
+              max="200"
+              value={localData.delay_per_char || 50}
+              onChange={(e) => updateNodeData({ delay_per_char: parseInt(e.target.value) })}
+              placeholder="50"
+            />
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              每个字符增加的延迟时间（毫秒）。中英文字符均按1个字符计算
+            </div>
+          </div>
+
+          <div className="config-field">
+            <label>最大延迟 (秒)</label>
+            <input
+              type="number"
+              min="1"
+              max="60"
+              value={localData.max_delay || 10}
+              onChange={(e) => updateNodeData({ max_delay: parseInt(e.target.value) })}
+              placeholder="10"
+            />
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              延迟时间的上限，防止过长消息导致延迟过久
+            </div>
+          </div>
+
+          {/* 延迟预览 */}
+          <div className="config-field">
+            <div style={{ 
+              padding: '8px 12px', 
+              backgroundColor: '#f5f5f5', 
+              borderRadius: '4px',
+              fontSize: '12px',
+              color: '#666'
+            }}>
+              <strong>延迟预览：</strong>
+              <br />
+              • 10字符消息：{((localData.base_delay || 1) + (10 * (localData.delay_per_char || 50)) / 1000).toFixed(1)}秒
+              <br />
+              • 50字符消息：{Math.min((localData.base_delay || 1) + (50 * (localData.delay_per_char || 50)) / 1000, localData.max_delay || 10).toFixed(1)}秒
+              <br />
+              • 100字符消息：{Math.min((localData.base_delay || 1) + (100 * (localData.delay_per_char || 50)) / 1000, localData.max_delay || 10).toFixed(1)}秒
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="config-field">
         <label>最大重试次数</label>
@@ -1448,6 +1759,355 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* 媒体选择器弹窗 */}
+      {showMediaSelector.show && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 2000
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '8px',
+            padding: '20px',
+            width: '800px',
+            maxHeight: '80vh',
+            overflow: 'auto',
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '16px',
+              borderBottom: '1px solid #e9ecef',
+              paddingBottom: '8px'
+            }}>
+              <h4 style={{ margin: 0 }}>选择媒体资源</h4>
+              <button
+                onClick={() => setShowMediaSelector({ show: false })}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '18px',
+                  cursor: 'pointer',
+                  color: '#666'
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            {loadingMedia ? (
+              <div style={{ textAlign: 'center', padding: '20px' }}>
+                加载中...
+              </div>
+            ) : (
+              <>
+                <p style={{ color: '#666', marginBottom: '16px' }}>
+                  请选择一个媒体文件或目录，其标识符将被插入到您的 Prompt 中。
+                </p>
+
+                {/* 文件夹列表 */}
+                {folderList.length > 0 && (
+                  <div style={{ marginBottom: '20px' }}>
+                    <h5 style={{ margin: '0 0 8px 0', color: '#007bff' }}>📁 文件夹</h5>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '8px' }}>
+                      {folderList.map((folder, index) => (
+                        <div key={index}>
+                          <div
+                            style={{
+                              padding: '12px',
+                              borderRadius: '4px',
+                              border: '1px solid #e9ecef',
+                              cursor: 'pointer',
+                              transition: 'all 0.2s',
+                              backgroundColor: expandedFolder === folder.name ? '#e3f2fd' : '#f8f9fa',
+                              textAlign: 'center'
+                            }}
+                            onMouseEnter={(e) => {
+                              if (expandedFolder !== folder.name) {
+                                e.currentTarget.style.backgroundColor = '#e9ecef';
+                                e.currentTarget.style.borderColor = '#007bff';
+                              }
+                            }}
+                            onMouseLeave={(e) => {
+                              if (expandedFolder !== folder.name) {
+                                e.currentTarget.style.backgroundColor = '#f8f9fa';
+                                e.currentTarget.style.borderColor = '#e9ecef';
+                              }
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: '24px', marginBottom: '4px' }}>📁</div>
+                                <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{folder.name}</div>
+                                <div style={{ fontSize: '12px', color: '#666' }}>{folder.media_count} 项</div>
+                              </div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const tag = `[[FOLDER:${folder.name}]]`;
+                                    let updatedPrompt = '';
+                                    let currentPrompt = '';
+
+                                    if (showMediaSelector.position === 'system_prompt') {
+                                      currentPrompt = localData.system_prompt || '';
+                                      updatedPrompt = currentPrompt + tag;
+                                      updateNodeData({ system_prompt: updatedPrompt });
+                                    } else if (showMediaSelector.position === 'user_prompt') {
+                                      currentPrompt = localData.user_prompt || '';
+                                      updatedPrompt = currentPrompt + tag;
+                                      updateNodeData({ user_prompt: updatedPrompt });
+                                    }
+
+                                    setShowMediaSelector({ show: false });
+                                  }}
+                                  style={{
+                                    padding: '4px 8px',
+                                    fontSize: '10px',
+                                    backgroundColor: '#28a745',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '3px',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  选择整个文件夹
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (expandedFolder === folder.name) {
+                                      setExpandedFolder(null);
+                                      setFolderMediaList([]);
+                                    } else {
+                                      setExpandedFolder(folder.name);
+                                      fetchFolderMedia(folder.name);
+                                    }
+                                  }}
+                                  style={{
+                                    padding: '4px 8px',
+                                    fontSize: '10px',
+                                    backgroundColor: '#007bff',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '3px',
+                                    cursor: 'pointer'
+                                  }}
+                                >
+                                  {expandedFolder === folder.name ? '收起' : '展开'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                          
+                          {/* 展开的文件夹内容 */}
+                          {expandedFolder === folder.name && (
+                            <div style={{ 
+                              marginTop: '8px', 
+                              padding: '8px', 
+                              backgroundColor: '#f0f8ff', 
+                              borderRadius: '4px',
+                              border: '1px solid #b3d9ff'
+                            }}>
+                              <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
+                                文件夹 "{folder.name}" 中的文件：
+                              </div>
+                              {folderMediaList.length > 0 ? (
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '6px' }}>
+                                  {folderMediaList.map((media, mediaIndex) => (
+                                    <div
+                                      key={mediaIndex}
+                                      onClick={() => {
+                                        const tag = `[[MEDIA:${media.id}]]`;
+                                        let updatedPrompt = '';
+                                        let currentPrompt = '';
+
+                                        if (showMediaSelector.position === 'system_prompt') {
+                                          currentPrompt = localData.system_prompt || '';
+                                          updatedPrompt = currentPrompt + tag;
+                                          updateNodeData({ system_prompt: updatedPrompt });
+                                        } else if (showMediaSelector.position === 'user_prompt') {
+                                          currentPrompt = localData.user_prompt || '';
+                                          updatedPrompt = currentPrompt + tag;
+                                          updateNodeData({ user_prompt: updatedPrompt });
+                                        }
+
+                                        setShowMediaSelector({ show: false });
+                                      }}
+                                      style={{
+                                        padding: '6px',
+                                        borderRadius: '4px',
+                                        border: '1px solid #cce7ff',
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s',
+                                        backgroundColor: 'white',
+                                        textAlign: 'center'
+                                      }}
+                                      onMouseEnter={(e) => {
+                                        e.currentTarget.style.backgroundColor = '#e6f3ff';
+                                        e.currentTarget.style.borderColor = '#007bff';
+                                      }}
+                                      onMouseLeave={(e) => {
+                                        e.currentTarget.style.backgroundColor = 'white';
+                                        e.currentTarget.style.borderColor = '#cce7ff';
+                                      }}
+                                    >
+                                      {media.file_url && media.media_type === 'image' ? (
+                                        <img 
+                                          src={media.file_url} 
+                                          alt={media.filename}
+                                          style={{ 
+                                            width: '100%', 
+                                            height: '60px', 
+                                            objectFit: 'cover', 
+                                            borderRadius: '3px',
+                                            marginBottom: '3px'
+                                          }}
+                                        />
+                                      ) : (
+                                        <div style={{ 
+                                          width: '100%', 
+                                          height: '60px', 
+                                          backgroundColor: '#f0f0f0',
+                                          borderRadius: '3px',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          marginBottom: '3px',
+                                          fontSize: '20px'
+                                        }}>
+                                          {media.media_type === 'video' ? '🎥' : 
+                                           media.media_type === 'audio' ? '🎵' : 
+                                           media.media_type === 'document' ? '📄' : '📎'}
+                                        </div>
+                                      )}
+                                      <div style={{ fontWeight: 'bold', fontSize: '10px', marginBottom: '1px' }}>
+                                        {media.filename.length > 12 ? media.filename.substring(0, 12) + '...' : media.filename}
+                                      </div>
+                                      <div style={{ fontSize: '9px', color: '#666' }}>
+                                        {media.media_type}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div style={{ textAlign: 'center', color: '#666', fontSize: '12px' }}>
+                                  文件夹为空
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 媒体文件列表 */}
+                {mediaList.length > 0 && (
+                  <div>
+                    <h5 style={{ margin: '0 0 8px 0', color: '#007bff' }}>🖼️ 媒体文件</h5>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '8px' }}>
+                      {mediaList.map((media, index) => (
+                        <div
+                          key={index}
+                          onClick={() => {
+                            const tag = `[[MEDIA:${media.id}]]`;
+                            let updatedPrompt = '';
+                            let currentPrompt = '';
+
+                            if (showMediaSelector.position === 'system_prompt') {
+                              currentPrompt = localData.system_prompt || '';
+                              updatedPrompt = currentPrompt + tag;
+                              updateNodeData({ system_prompt: updatedPrompt });
+                            } else if (showMediaSelector.position === 'user_prompt') {
+                              currentPrompt = localData.user_prompt || '';
+                              updatedPrompt = currentPrompt + tag;
+                              updateNodeData({ user_prompt: updatedPrompt });
+                            }
+
+                            setShowMediaSelector({ show: false });
+                          }}
+                          style={{
+                            padding: '8px',
+                            borderRadius: '4px',
+                            border: '1px solid #e9ecef',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s',
+                            backgroundColor: '#f8f9fa',
+                            textAlign: 'center'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = '#e9ecef';
+                            e.currentTarget.style.borderColor = '#007bff';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = '#f8f9fa';
+                            e.currentTarget.style.borderColor = '#e9ecef';
+                          }}
+                        >
+                          {media.file_url && media.media_type === 'image' ? (
+                            <img 
+                              src={media.file_url} 
+                              alt={media.filename}
+                              style={{ 
+                                width: '100%', 
+                                height: '80px', 
+                                objectFit: 'cover', 
+                                borderRadius: '4px',
+                                marginBottom: '4px'
+                              }}
+                            />
+                          ) : (
+                            <div style={{ 
+                              width: '100%', 
+                              height: '80px', 
+                              backgroundColor: '#dee2e6',
+                              borderRadius: '4px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              marginBottom: '4px',
+                              fontSize: '24px'
+                            }}>
+                              {media.media_type === 'video' ? '🎥' : 
+                               media.media_type === 'audio' ? '🎵' : 
+                               media.media_type === 'document' ? '📄' : '📎'}
+                            </div>
+                          )}
+                          <div style={{ fontWeight: 'bold', fontSize: '12px', marginBottom: '2px' }}>
+                            {media.filename.length > 15 ? media.filename.substring(0, 15) + '...' : media.filename}
+                          </div>
+                          <div style={{ fontSize: '10px', color: '#666' }}>
+                            {media.media_type} • {media.folder || '未分类'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {mediaList.length === 0 && folderList.length === 0 && !loadingMedia && (
+                  <div style={{ textAlign: 'center', padding: '20px', color: '#666' }}>
+                    暂无媒体文件
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       )}

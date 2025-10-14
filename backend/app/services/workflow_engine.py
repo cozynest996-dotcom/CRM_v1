@@ -144,6 +144,54 @@ class AIProcessor(NodeProcessor):
         self.db_session = db
         self.ai_service = None
     
+    async def _get_chat_history(self, customer_id: str, message_count: int, include_timestamps: bool = False) -> str:
+        """
+        获取客户的聊天历史记录
+        
+        Args:
+            customer_id: 客户ID
+            message_count: 获取的消息条数
+            include_timestamps: 是否包含时间戳
+            
+        Returns:
+            格式化的聊天历史字符串
+        """
+        try:
+            from app.db.models import Message
+            from datetime import datetime
+            
+            # 获取最近的消息记录
+            messages = self.db.query(Message).filter(
+                Message.customer_id == customer_id
+            ).order_by(Message.timestamp.desc()).limit(message_count).all()
+            
+            if not messages:
+                return ""
+            
+            # 反转顺序，使最早的消息在前
+            messages.reverse()
+            
+            # 格式化聊天历史
+            history_lines = []
+            for msg in messages:
+                # 确定发送者
+                sender = "客户" if msg.direction == "inbound" else "AI"
+                
+                # 格式化时间戳
+                if include_timestamps:
+                    timestamp = msg.timestamp.strftime("%Y-%m-%d %H:%M")
+                    line = f"[{timestamp}] {sender}: {msg.content}"
+                else:
+                    line = f"{sender}: {msg.content}"
+                
+                history_lines.append(line)
+            
+            return "\n".join(history_lines)
+            
+        except Exception as e:
+            logger.error(f"Failed to get chat history: {e}")
+            return ""
+    
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         """执行 AI 分析和回复生成"""
         print(f"\n🤖 AI節點開始執行...")
@@ -164,8 +212,74 @@ class AIProcessor(NodeProcessor):
             customer = self.context.db.get("customer")
             
             # 使用数据库中存储的 system_prompt 作为基础 prompt
-            base_system_prompt = node_data.get("system_prompt", node_config.get("system_prompt", "You are a professional AI assistant."))
-            user_prompt = node_data.get("user_prompt", node_config.get("user_prompt", "Please reply to the user's message."))
+            raw_system_prompt = node_data.get("system_prompt", node_config.get("system_prompt", "You are a professional AI assistant."))
+            raw_user_prompt = node_data.get("user_prompt", node_config.get("user_prompt", "Please reply to the user's message."))
+            
+            # 🔧 解析 System Prompt 中的变量
+            base_system_prompt = await self._resolve_prompt_variables(raw_system_prompt)
+            user_prompt = await self._resolve_prompt_variables(raw_user_prompt)
+
+            # 🔧 处理聊天历史配置
+            chat_history_config = node_data.get("chat_history", {})
+            chat_history_text = ""
+            
+            if chat_history_config.get("enabled", False):
+                # 优先使用来自 WhatsApp 网关的聊天历史
+                trigger_data = self.context.get("trigger_data", {})
+                gateway_chat_history = trigger_data.get("chat_history", [])
+                
+                if gateway_chat_history:
+                    message_count = chat_history_config.get("message_count", 10)
+                    include_timestamps = chat_history_config.get("include_timestamps", False)
+                    
+                    print(f"  📚 使用网关聊天历史: {len(gateway_chat_history)}条消息, 限制: {message_count}条, 时间戳: {include_timestamps}")
+                    
+                    # 限制消息数量
+                    limited_history = gateway_chat_history[-message_count:] if message_count > 0 else gateway_chat_history
+                    
+                    # 格式化聊天历史
+                    history_lines = []
+                    for msg in limited_history:
+                        sender = "客户" if msg.get("direction") == "inbound" else "AI"
+                        content = msg.get("content", "")
+                        
+                        if include_timestamps and msg.get("timestamp"):
+                            # 格式化时间戳
+                            from datetime import datetime
+                            try:
+                                timestamp = datetime.fromisoformat(msg["timestamp"].replace("Z", "+00:00"))
+                                time_str = timestamp.strftime("%Y-%m-%d %H:%M")
+                                line = f"[{time_str}] {sender}: {content}"
+                            except:
+                                line = f"{sender}: {content}"
+                        else:
+                            line = f"{sender}: {content}"
+                        
+                        history_lines.append(line)
+                    
+                    chat_history_text = "\n".join(history_lines)
+                    print(f"  ✅ 网关聊天历史处理成功: {len(history_lines)}行")
+                
+                elif customer:
+                    # 回退到数据库查询（保持兼容性）
+                    message_count = chat_history_config.get("message_count", 10)
+                    include_timestamps = chat_history_config.get("include_timestamps", False)
+                    
+                    print(f"  📚 回退到数据库查询聊天历史: {message_count}条消息, 时间戳: {include_timestamps}")
+                    chat_history_text = await self._get_chat_history(
+                        customer.id, 
+                        message_count, 
+                        include_timestamps
+                    )
+                    
+                    if chat_history_text:
+                        print(f"  ✅ 数据库聊天历史获取成功: {len(chat_history_text.split(chr(10)))}行")
+                    else:
+                        print(f"  ⚠️ 未找到聊天历史记录")
+                
+                # 将聊天历史添加到 user_prompt
+                if chat_history_text:
+                    user_prompt = f"聊天历史记录:\n{chat_history_text}\n\n当前用户消息: {user_prompt}"
 
             # 动态拼接 system_prompt，如果 enableHandoff 为 true
             enable_handoff = node_data.get("enableHandoff", False)
@@ -248,7 +362,7 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
 
             # 解析用户prompt中的变量
             resolved_user_prompt = await self._resolve_prompt_variables(user_prompt)
-            print(f"  解析後的 User Prompt: {resolved_user_prompt}")
+            # print(f"  解析後的 User Prompt: {resolved_user_prompt}") # Duplicate print
             
             # 🔧 修復：嘗試使用真正的 OpenAI API，如果失敗則使用模擬
             try:
@@ -257,21 +371,24 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
                 
                 if self.ai_service and self.ai_service.api_key and self.ai_service.client:
                     print(f"  📡 發送請求到 OpenAI...")
+                    # 获取媒体设置
+                    media_settings = node_data.get("media_settings", {})
                     llm_response = await self.ai_service.generate_combined_response(
                         system_prompt=system_prompt,
                         user_prompt=resolved_user_prompt,
                         model=model_config.get("name", "gpt-4o-mini"),
                         temperature=model_config.get("temperature", 0.7),
-                        max_tokens=model_config.get("max_tokens", 900)
+                        max_tokens=model_config.get("max_tokens", 900),
+                        media_settings=media_settings
                     )
                     print(f"  ✅ OpenAI API 回復: {llm_response.get('reply', {}).get('reply_text', '')}")
                     
                     # 美化并打印完整的LLM输出
                     try:
                         import json
-                        print("--- 完整的LLM原始输出 (美化JSON) ---")
-                        print(json.dumps(llm_response, indent=2, ensure_ascii=False))
-                        print("--- LLM原始输出结束 ---")
+                        # print("--- 完整的LLM原始输出 (美化JSON) ---") # Remove verbose LLM output print
+                        # print(json.dumps(llm_response, indent=2, ensure_ascii=False)) # Remove verbose LLM output print
+                        # print("--- LLM原始输出结束 ---") # Remove verbose LLM output print
                     except Exception as e:
                         print(f"  ⚠️ 打印LLM原始输出失败: {e}")
 
@@ -457,28 +574,62 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
         以及 {{db.customer.<field>}}。
         """
         resolved_prompt = prompt or ""
+        
+        # print(f"  🔍 解析 Prompt 变量前: {resolved_prompt[:100]}...") # Remove verbose pre-resolution print
 
         try:
             # 获取触发器数据
             trigger_data = self.context.get("trigger_data", {}) or {}
+            # print(f"  📎 触发器数据: {trigger_data}") # Remove verbose trigger data print
 
             # 修正字段映射：模板中使用 content，但触发器中为 message
-            resolved_prompt = resolved_prompt.replace("{{trigger.name}}", str(trigger_data.get("name", "")))
-            resolved_prompt = resolved_prompt.replace("{{trigger.phone}}", str(trigger_data.get("phone", "")))
-            resolved_prompt = resolved_prompt.replace("{{trigger.content}}", str(trigger_data.get("message", "")))
-            resolved_prompt = resolved_prompt.replace("{{trigger.timestamp}}", str(trigger_data.get("timestamp", "")))
+            if "{{trigger.name}}" in resolved_prompt:
+                name_value = str(trigger_data.get("name", ""))
+                resolved_prompt = resolved_prompt.replace("{{trigger.name}}", name_value)
+                # print(f"    - 替换 {{{{trigger.name}}}} -> '{name_value}'")
+                
+            if "{{trigger.phone}}" in resolved_prompt:
+                phone_value = str(trigger_data.get("phone", ""))
+                resolved_prompt = resolved_prompt.replace("{{trigger.phone}}", phone_value)
+                # print(f"    - 替换 {{{{trigger.phone}}}} -> '{phone_value}'")
+                
+            if "{{trigger.content}}" in resolved_prompt:
+                content_value = str(trigger_data.get("message", ""))
+                resolved_prompt = resolved_prompt.replace("{{trigger.content}}", content_value)
+                # print(f"    - 替换 {{{{trigger.content}}}} -> '{content_value}'")
+                
+            if "{{trigger.timestamp}}" in resolved_prompt:
+                timestamp_value = str(trigger_data.get("timestamp", ""))
+                resolved_prompt = resolved_prompt.replace("{{trigger.timestamp}}", timestamp_value)
+                # print(f"    - 替换 {{{{trigger.timestamp}}}} -> '{timestamp_value}'")
 
             # 客户字段替换
             customer = self.context.db.get("customer")
             if customer:
-                resolved_prompt = resolved_prompt.replace("{{db.customer.name}}", str(getattr(customer, "name", "")))
-                resolved_prompt = resolved_prompt.replace("{{db.customer.phone}}", str(getattr(customer, "phone", "")))
-                resolved_prompt = resolved_prompt.replace("{{db.customer.status}}", str(getattr(customer, "status", "")))
-                resolved_prompt = resolved_prompt.replace("{{db.customer.email}}", str(getattr(customer, "email", "")))
+                if "{{db.customer.name}}" in resolved_prompt:
+                    customer_name = str(getattr(customer, "name", ""))
+                    resolved_prompt = resolved_prompt.replace("{{db.customer.name}}", customer_name)
+                    # print(f"    - 替换 {{{{db.customer.name}}}} -> '{customer_name}'")
+                    
+                if "{{db.customer.phone}}" in resolved_prompt:
+                    customer_phone = str(getattr(customer, "phone", ""))
+                    resolved_prompt = resolved_prompt.replace("{{db.customer.phone}}", customer_phone)
+                    # print(f"    - 替换 {{{{db.customer.phone}}}} -> '{customer_phone}'")
+                    
+                if "{{db.customer.status}}" in resolved_prompt:
+                    customer_status = str(getattr(customer, "status", ""))
+                    resolved_prompt = resolved_prompt.replace("{{db.customer.status}}", customer_status)
+                    # print(f"    - 替换 {{{{db.customer.status}}}} -> '{customer_status}'")
+                    
+                if "{{db.customer.email}}" in resolved_prompt:
+                    customer_email = str(getattr(customer, "email", ""))
+                    resolved_prompt = resolved_prompt.replace("{{db.customer.email}}", customer_email)
+                    # print(f"    - 替换 {{{{db.customer.email}}}} -> '{customer_email}'")
 
         except Exception as err:
-            print(f"  ⚠️ 解析 prompt 变变量失败: {err}")
+            print(f"  ⚠️ 解析 prompt 变量失败: {err}")
 
+        print(f"  ✅ 解析 Prompt 变量后: {resolved_prompt[:100]}...")
         return resolved_prompt
     
     async def _simulate_ai_response(self, system_prompt: str, user_prompt: str, model_config: dict) -> str:
@@ -683,6 +834,93 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
         super().__init__(db, context)
         self.whatsapp_service = WhatsAppService()
     
+    def _calculate_send_delay(self, message: str, delay_config: Dict[str, Any]) -> float:
+        """
+        计算发送延迟时间（秒）
+        
+        Args:
+            message: 要发送的消息内容
+            delay_config: 延迟配置
+                - enable_smart_delay: 是否启用智能延迟 (默认: False)
+                - base_delay: 基础延迟秒数 (默认: 1)
+                - delay_per_char: 每字符增加的毫秒数 (默认: 50)
+                - max_delay: 最大延迟秒数 (默认: 10)
+        
+        Returns:
+            延迟时间（秒），如果未启用智能延迟则返回 0.0
+        """
+        if not delay_config.get("enable_smart_delay", False):
+            return 0.0
+        
+        message_length = len(message) if message else 0
+        base_delay_ms = delay_config.get("base_delay", 1) * 1000
+        delay_per_char_ms = delay_config.get("delay_per_char", 50)
+        max_delay_ms = delay_config.get("max_delay", 10) * 1000
+        
+        # 计算总延迟时间（毫秒）
+        calculated_delay_ms = base_delay_ms + (message_length * delay_per_char_ms)
+        
+        # 限制最大延迟
+        final_delay_ms = min(calculated_delay_ms, max_delay_ms)
+        
+        return final_delay_ms / 1000.0  # 转换为秒
+    
+    async def _get_media_urls_from_identifiers(self, media_uuids: List[str], folder_names: List[str], user_id: int) -> List[str]:
+        """
+        根据媒体UUID和文件夹名称获取媒体文件URL
+        
+        Args:
+            media_uuids: 媒体文件UUID列表
+            folder_names: 文件夹名称列表
+            user_id: 用户ID
+            
+        Returns:
+            List[str]: 媒体文件URL列表
+        """
+        try:
+            from app.db.models import MediaFile
+            from app.services import supabase as supabase_service
+            from app.core.config import settings
+            
+            media_urls = []
+            
+            # 获取单个媒体文件
+            if media_uuids:
+                media_files = self.db.query(MediaFile).filter(
+                    MediaFile.id.in_(media_uuids),
+                    MediaFile.user_id == user_id
+                ).all()
+                
+                for media_file in media_files:
+                    # 生成签名URL
+                    relative_path = media_file.filepath.replace(f"{settings.SUPABASE_BUCKET}/", "", 1)
+                    signed_url = await supabase_service.get_signed_url_for_file(relative_path)
+                    if signed_url:
+                        media_urls.append(signed_url)
+                        print(f"    📎 添加媒体文件: {media_file.filename}")
+            
+            # 获取文件夹中的所有媒体文件
+            if folder_names:
+                for folder_name in folder_names:
+                    folder_media = self.db.query(MediaFile).filter(
+                        MediaFile.user_id == user_id,
+                        MediaFile.folder == folder_name,
+                        MediaFile.filename != ".keep"  # 排除.keep文件
+                    ).all()
+                    
+                    for media_file in folder_media:
+                        relative_path = media_file.filepath.replace(f"{settings.SUPABASE_BUCKET}/", "", 1)
+                        signed_url = await supabase_service.get_signed_url_for_file(relative_path)
+                        if signed_url:
+                            media_urls.append(signed_url)
+                            print(f"    📁 添加文件夹媒体: {folder_name}/{media_file.filename}")
+            
+            return media_urls
+            
+        except Exception as e:
+            logger.error(f"Failed to get media URLs from identifiers: {e}")
+            return []
+    
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         """发送 WhatsApp 消息"""
         # 🔧 修復：從 data 字段獲取配置，與其他節點保持一致
@@ -696,7 +934,7 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
         print(f"📤 SendWhatsApp 節點開始執行:")
         print(f"  初始配置 - to: '{to}', message: '{message}'")
         print(f"  node_data keys: {list(node_data.keys())}")
-        print(f"  context keys: {list(self.context.__dict__.keys())}")
+        # print(f"  context keys: {list(self.context.__dict__.keys())}") # Remove verbose context keys print
         
         # 解析变量和自动填充 'to' 字段
         send_mode = node_data.get("send_mode", "trigger_number")
@@ -728,9 +966,9 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
         
         # 🔧 修復：改善 AI 回復文本的讀取邏輯
         # 统一使用新的变量解析函数来处理 message 字段
-        print(f"  🔍 解析消息变量前: '{message}'")
+        # print(f"  🔍 解析消息变量前: '{message}'") # Remove verbose pre-resolution message print
         message = self._resolve_variable_from_context(message)
-        print(f"  🔍 解析消息变量后: '{message}'")
+        # print(f"  🔍 解析消息变量后: '{message}'") # Remove verbose post-resolution message print
         
         # 如果 message 仍然为空或未解析，则按优先级从上下文获取
         if not message:
@@ -770,8 +1008,24 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
             logger.info(f"Message deduplicated for {to}")
             return {"ctx.message_id": "deduplicated", "ctx.sent_at": datetime.utcnow().isoformat()}
         
+        # 获取智能延迟配置
+        delay_config = {
+            "enable_smart_delay": node_data.get("enable_smart_delay", False),
+            "base_delay": node_data.get("base_delay", 1),
+            "delay_per_char": node_data.get("delay_per_char", 50),
+            "max_delay": node_data.get("max_delay", 10)
+        }
+        
+        # 计算发送延迟
+        send_delay = self._calculate_send_delay(message, delay_config)
+        if send_delay > 0:
+            print(f"⏱️ 智能延迟: {send_delay:.2f}秒 (消息长度: {len(message)}字符)")
+            await asyncio.sleep(send_delay)
+        else:
+            print(f"🚀 立即发送 (智能延迟未启用)")
+
         # 发送消息
-        print(f"🚀 開始發送 WhatsApp 消息...")
+        print(f"📤 開始發送 WhatsApp 消息...")
         for attempt in range(retries.get("max", 1)):
             try:
                 print(f"  嘗試 {attempt + 1}/{retries.get('max', 1)}")
@@ -787,8 +1041,100 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     raise ValueError("Cannot send WhatsApp message: user_id is required")
                 
                 print(f"  調用 WhatsApp 服務...")
-                result = await self.whatsapp_service.send_message(to, message, user_id)
-                print(f"  ✅ 發送結果: {result}")
+                
+                # 检查是否有媒体需要发送
+                ai_reply = self.context.ai.get("reply", {})
+                media_uuids = ai_reply.get("media_uuids", [])
+                folder_names = ai_reply.get("folder_names", [])
+                media_settings = ai_reply.get("media_settings", {})
+                
+                print(f"  媒体信息: UUIDs={media_uuids}, Folders={folder_names}, Settings={media_settings}")
+                
+                # 根据 UUIDs 和 folder_names 获取实际的媒体 URL
+                media_urls = []
+                if media_uuids or folder_names:
+                    media_urls = await self._get_media_urls_from_identifiers(media_uuids, folder_names, user_id)
+                    print(f"  📎 获取到 {len(media_urls)} 个媒体文件URL")
+                
+                # 处理媒体发送
+                if media_urls:
+                    send_separately = media_settings.get("send_media_separately", False)
+                    send_with_caption = media_settings.get("send_with_caption", True)
+                    delay_between_media = media_settings.get("delay_between_media", False)
+                    delay_seconds = media_settings.get("delay_seconds", 2)
+                    
+                    if send_separately:
+                        # 分开发送：先发送媒体，再发送文本（确保媒体完全上传后再发送文字说明）
+                        print(f"  🖼️ 分开发送模式：先发送所有媒体文件")
+                        
+                        # 先发送每个媒体文件
+                        media_success_count = 0
+                        for i, media_url in enumerate(media_urls):
+                            try:
+                                if delay_between_media and i > 0:
+                                    print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                    await asyncio.sleep(delay_seconds)
+                                
+                                print(f"  🖼️ 发送媒体 {i+1}/{len(media_urls)}: {media_url}")
+                                media_result = await self.whatsapp_service.send_message(
+                                    to, "", user_id, media_url=media_url, media_type="image"
+                                )
+                                print(f"  ✅ 媒体 {i+1} 发送请求已提交: {media_result}")
+                                
+                                # 等待媒体上传完成（根据文件大小估算上传时间）
+                                upload_wait_time = 3 + (i * 2)  # 基础3秒 + 每个文件额外2秒
+                                print(f"  ⏳ 等待媒体 {i+1} 上传完成 ({upload_wait_time}秒)...")
+                                await asyncio.sleep(upload_wait_time)
+                                
+                                media_success_count += 1
+                            except Exception as media_error:
+                                print(f"  ❌ 媒体 {i+1} 发送失败: {media_error}")
+                                # 继续发送下一个媒体，不中断整个流程
+                        
+                        print(f"  📊 媒体发送结果: {media_success_count}/{len(media_urls)} 成功")
+                        
+                        # 额外等待时间确保所有媒体完全上传
+                        final_wait_time = 5  # 最终等待5秒
+                        print(f"  ⏳ 最终等待 {final_wait_time} 秒确保所有媒体上传完成...")
+                        await asyncio.sleep(final_wait_time)
+                        
+                        # 所有媒体上传完成后，再发送文本消息
+                        print(f"  📝 媒体上传完成，现在发送文本消息")
+                        text_result = await self.whatsapp_service.send_message(to, message, user_id)
+                        print(f"  ✅ 文本消息发送结果: {text_result}")
+                        
+                        result = text_result  # 使用文本消息的结果作为主要结果
+                    else:
+                        # 一起发送：媒体附带文本说明
+                        if len(media_urls) == 1:
+                            # 单个媒体文件，附带文本
+                            caption = message if send_with_caption else ""
+                            print(f"  🖼️📝 发送单个媒体附带文本: {media_urls[0]}")
+                            result = await self.whatsapp_service.send_message(
+                                to, caption, user_id, media_url=media_urls[0], media_type="image"
+                            )
+                        else:
+                            # 多个媒体文件，先发送文本，再发送媒体
+                            print(f"  📝 多媒体模式：先发送文本消息")
+                            text_result = await self.whatsapp_service.send_message(to, message, user_id)
+                            
+                            for i, media_url in enumerate(media_urls):
+                                if delay_between_media and i > 0:
+                                    print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                    await asyncio.sleep(delay_seconds)
+                                
+                                print(f"  🖼️ 发送媒体 {i+1}/{len(media_urls)}: {media_url}")
+                                media_result = await self.whatsapp_service.send_message(
+                                    to, "", user_id, media_url=media_url, media_type="image"
+                                )
+                                print(f"  ✅ 媒体 {i+1} 发送结果: {media_result}")
+                            
+                            result = text_result
+                else:
+                    # 没有媒体，只发送文本
+                    result = await self.whatsapp_service.send_message(to, message, user_id)
+                
+                print(f"  ✅ 最终发送结果: {result}")
                 
                 # 记录消息到数据库
                 customer = self.context.db.get("customer")
@@ -802,6 +1148,13 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     )
                     self.db.add(msg)
                     self.db.commit()
+                    self.db.refresh(msg)
+                    
+                    # 🆕 保存 whatsapp_id
+                    if result.get("whatsapp_id"):  # Check if whatsapp_id is present in the result
+                        msg.whatsapp_id = result["whatsapp_id"]
+                        self.db.add(msg)
+                        self.db.commit()
                 else:
                     # 没有 customer 时，仍返回成功但不写入 messages 表
                     logger.info("Sent message but no customer in context; skipping DB insert")
@@ -853,45 +1206,80 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
         if not isinstance(text, str): # Ensure text is a string
             return str(text)
 
+        def get_nested_value(data, path_parts):
+            current = data
+            for part in path_parts:
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                elif isinstance(current, object) and hasattr(current, part):
+                    current = getattr(current, part)
+                else:
+                    return None
+            return current
+
         def replace_match(match):
             var_path = match.group(1).strip() # Extract path inside {{}} or {}
             print(f"  🔍 Resolving variable path: {var_path}") # Debug print
-            print(f"    - Available context keys: {list(self.context.variables.keys())}")
 
+            # 尝试从各种上下文中解析变量
+            # 优先级：trigger_data, actor, db.customer, ai.reply, 通用变量, 其他节点输出
+
+            # 1. 优先尝试 'trigger' 相关变量
+            if var_path.startswith("trigger."):
+                trigger_data = self.context.get("trigger_data", {})
+                value = get_nested_value(trigger_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"    - Resolved from trigger: {var_path} -> {value}")
+                    return str(value)
+
+            # 2. 尝试 'actor' 相关变量
+            if var_path.startswith("actor."):
+                actor_data = self.context.get("actor", {})
+                value = get_nested_value(actor_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"    - Resolved from actor: {var_path} -> {value}")
+                    return str(value)
+
+            # 3. 尝试 'db.customer' 相关变量
+            if var_path.startswith("db.customer."):
+                customer_obj = self.context.db.get("customer")
+                if customer_obj:
+                    value = get_nested_value(customer_obj, var_path.split('.')[2:])
+                    if value is not None:
+                        print(f"    - Resolved from db.customer: {var_path} -> {value}")
+                        return str(value)
+
+            # 4. 尝试 'ai.reply' 相关变量
+            if var_path.startswith("ai.reply."):
+                ai_reply = self.context.ai.get("reply", {})
+                value = get_nested_value(ai_reply, var_path.split('.')[2:])
+                if value is not None:
+                    print(f"    - Resolved from ai.reply: {var_path} -> {value}")
+                    return str(value)
+
+            # 5. 尝试通用变量 (self.context.variables)
+            if var_path in self.context.variables:
+                value = self.context.variables[var_path]
+                print(f"    - Resolved from context.variables: {var_path} -> {value}")
+                return str(value)
+            
+            # 6. 尝试解析特定节点输出变量，例如 AI_NODE_ID.output.reply_text
             parts = var_path.split('.')
-            current_value = self.context.variables
-            resolved_segment_count = 0
-            
-            # Try to find the longest matching prefix of var_path as a key in current_value
-            # This handles compound keys like 'AI_NODE_ID.output'
-            for i in range(len(parts), 0, -1):
-                potential_compound_key = ".".join(parts[:i])
-                if potential_compound_key in current_value:
-                    print(f"    - Found compound key: {potential_compound_key}")
-                    current_value = current_value[potential_compound_key]
-                    resolved_segment_count = i
-                    break
-            
-            # Now resolve the remaining parts (if any) from the current_value
-            remaining_parts = parts[resolved_segment_count:]
+            if len(parts) >= 2:
+                node_id = parts[0]
+                output_key = parts[1]
+                # 检查是否是合法的节点输出路径，例如 AI_123.output
+                if output_key == "output" and node_id in self.context.variables:
+                    node_output = self.context.variables[node_id]
+                    nested_path = parts[2:] # 进一步的嵌套路径，例如 reply_text
+                    value = get_nested_value(node_output, nested_path)
+                    if value is not None:
+                        print(f"    - Resolved from node output: {var_path} -> {value}")
+                        return str(value)
 
-            for i, part in enumerate(remaining_parts):
-                print(f"    - Current remaining part: {part}, Current value type: {type(current_value)}, Current value: {current_value}") # Debug print
-
-                if isinstance(current_value, dict):
-                    if part in current_value:
-                        current_value = current_value[part]
-                    else:
-                        print(f"    ⚠️ Dictionary key '{part}' not found in current value.") # Debug print
-                        return match.group(0) # Variable not found, return original placeholder
-                elif hasattr(current_value, part): # If current_value is an object with the attribute
-                    current_value = getattr(current_value, part)
-                else:
-                    print(f"    ⚠️ Attribute '{part}' not found in current value.") # Debug print
-                    return match.group(0) # Variable not found, return original placeholder
-            
-            print(f"    ✅ Resolved to: {current_value}")
-            return str(current_value) if current_value is not None else ""
+            # 如果所有尝试都失败，返回原始的变量占位符
+            print(f"    - Failed to resolve: {var_path}")
+            return match.group(0) # Return original {{variable}} or {variable} including braces
 
         # Handle both {{variable}} and {variable} patterns
         text = re.sub(r'''\{\{(.*?)\}\}''', replace_match, text)
@@ -912,20 +1300,20 @@ class TemplateProcessor(NodeProcessor):
             variables = node_data.get("variables", {})
             fallback_template = node_data.get("fallback_template", "您好！感谢您的咨询。")
             
-            print(f"🔍 Template节点数据结构检查:")
-            print(f"  完整node_config keys: {list(node_config.keys())}")
-            print(f"  node_data keys: {list(node_data.keys())}")
-            print(f"  variables类型: {type(variables)}, 值: {variables}")
+            # print(f"🔍 Template节点数据结构检查:") # Remove verbose template node data check
+            # print(f"  完整node_config keys: {list(node_config.keys())}") # Remove verbose template node data check
+            # print(f"  node_data keys: {list(node_data.keys())}") # Remove verbose template node data check
+            # print(f"  variables类型: {type(variables)}, 值: {variables}") # Remove verbose template node data check
             
             # 解析变量
             resolved_variables = {}
-            print(f"🔍 模板变量解析开始:")
-            print(f"  原始变量: {variables}")
+            # print(f"🔍 模板变量解析开始:") # Remove verbose template variable parsing start
+            # print(f"  原始变量: {variables}") # Remove verbose original variables print
             for var_key, var_expression in variables.items():
                 resolved_value = await self._resolve_variable(var_expression)
                 resolved_variables[var_key] = resolved_value
-                print(f"  {var_key}: '{var_expression}' → '{resolved_value}'")
-            print(f"  解析结果: {resolved_variables}")
+                # print(f"  {var_key}: '{var_expression}' → '{resolved_value}'") # Remove verbose individual variable resolution print
+            # print(f"  解析结果: {resolved_variables}") # Remove verbose resolved variables print
             
             # WhatsApp 模板消息
             if template_type == "whatsapp" and template_name:
@@ -941,11 +1329,11 @@ class TemplateProcessor(NodeProcessor):
                 }
             else:
                 # 普通文本消息
-                print(f"📝 应用模板:")
-                print(f"  模板: '{fallback_template}'")
-                print(f"  变量: {resolved_variables}")
+                # print(f"📝 应用模板:") # Remove verbose template application start
+                # print(f"  模板: '{fallback_template}'") # Remove verbose template print
+                # print(f"  变量: {resolved_variables}") # Remove verbose variables print
                 message_text = self._apply_template(fallback_template, resolved_variables)
-                print(f"  结果: '{message_text}'")
+                # print(f"  结果: '{message_text}'") # Remove verbose result print
                 return {
                     "ai.reply.reply_text": message_text,
                     "message_content": message_text,
@@ -1028,9 +1416,9 @@ class TemplateProcessor(NodeProcessor):
         """应用变量到模板 - resolved_variables应该是解析后的实际值"""
         result = template
         
-        print(f"🔧 模板替换详情:")
-        print(f"  原始模板: '{template}'")
-        print(f"  解析后变量: {resolved_variables}")
+        # print(f"🔧 模板替换详情:") # Remove verbose template replacement details
+        # print(f"  原始模板: '{template}'") # Remove verbose template replacement details
+        # print(f"  解析后变量: {resolved_variables}") # Remove verbose template replacement details
         
         # resolved_variables的格式应该是: {'1': 'Debug User', '2': '601168208639', '3': '再次测试变量'}
         # 但是模板中的占位符是: {{trigger.name}}, {{trigger.content}} 等
@@ -1058,7 +1446,7 @@ class TemplateProcessor(NodeProcessor):
                     else:
                         value = str(trigger_data.get(field, ""))
                     
-                    print(f"    替换 {var_expr} → '{value}'")
+                    # print(f"    替换 {var_expr} → '{value}'") # Remove verbose individual variable replacement print
                     return value
                 # 可以扩展支持其他类型的变量
                 return var_expr  # 如果不能解析，保持原样
@@ -1069,7 +1457,7 @@ class TemplateProcessor(NodeProcessor):
         # 使用正则表达式替换所有 {{...}} 表达式
         result = re.sub(r'''\{\{(.*?)\}\}''', replace_variable, template)
         
-        print(f"  最终结果: '{result}'")
+        # print(f"  最终结果: '{result}'") # Remove verbose final result print
         
         return result
 
@@ -1638,7 +2026,7 @@ class WorkflowEngine:
             processor = processor_class(self.db, context)
             print(f"    ⏳ 開始執行節點...")
             output_data = await processor.execute(node)
-            print(f"    ✅ 節點執行完成，輸出: {output_data}")
+            # print(f"    ✅ 節點執行完成，輸出: {output_data}")
             
             # 更新上下文
             context.update_from_dict(output_data)

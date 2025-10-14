@@ -23,28 +23,31 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: always
+    env_file:
+      - ./.env
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://crm_user:crm_password@db:5432/crm_db
+      - DATABASE_URL=${DATABASE_URL}
       - WHATSAPP_GATEWAY_URL=http://whatsapp_gateway:3002
     volumes:
       - ./backend:/app # Binding mount for local code changes
     depends_on:
       db:
         condition: service_healthy
-    entrypoint: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    entrypoint: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000 # Assuming backend runs on localhost:8000
-      NEXT_PUBLIC_WHATSAPP_GATEWAY_URL: http://localhost:3002
+      NEXT_PUBLIC_API_URL: http://localhost:8000 # Browser must use localhost to reach host-mapped backend
+      NEXT_PUBLIC_WHATSAPP_GATEWAY_URL: http://localhost:3002 # Browser must use localhost to reach host-mapped gateway
     volumes:
+      - ./frontend:/app
       - /app/node_modules # Exclude node_modules from bind mount
     depends_on:
       backend:

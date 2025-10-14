@@ -29,8 +29,14 @@ def init_db():
     from app.db import models
     from app.models import custom_objects
     
+    print("INFO: Attempting to create database tables...")
     # Create all tables
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("INFO: Database tables checked/created successfully.")
+    except Exception as e:
+        print(f"ERROR: Failed to create database tables: {e}")
+        raise # Re-raise the exception to make it visible
 
 def create_default_subscription_plans():
     from app.db.models import SubscriptionPlan # 导入模型
@@ -51,10 +57,11 @@ def create_default_subscription_plans():
             db.add(free_plan)
             db.commit()
             db.refresh(free_plan)
-            print("Created default 'free' subscription plan.")
+            print("INFO: Created default 'free' subscription plan.")
     except Exception as e:
         db.rollback()
-        print(f"Error creating default subscription plan: {e}")
+        print(f"ERROR: Failed to create default subscription plan: {e}")
+        raise # Re-raise to make it visible
     finally:
         db.close()
 

@@ -285,3 +285,21 @@ class TelegramCode(Base):
     sent_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", backref="telegram_codes")
+
+# 新增：媒体文件模型
+class MediaFile(Base):
+    __tablename__ = "media_files"
+
+    id = Column(get_uuid_column(), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    filename = Column(String, nullable=False)
+    filepath = Column(String, nullable=False, unique=True)  # 在 Supabase Storage 中的完整路径 (例如: user_id/filename.jpg)
+    file_url = Column(String, nullable=True)  # 可公开访问的 URL (如果 bucket 是 public，或者使用签名 URL)
+    file_type = Column(String, nullable=True)  # 例如: 'image/jpeg', 'video/mp4'
+    folder = Column(String, nullable=True, index=True)  # 自定义文件夹名称
+    size = Column(Integer, nullable=True)  # 文件大小 (字节)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    user = relationship("User", backref="media_files")

@@ -430,7 +430,18 @@ export default function HomePage() {
             )}
           </div>
           <div style={{ marginTop: 12 }}>
-            <textarea value={text} onChange={e => setText(e.target.value)} style={{ width: '100%', height: 80 }} placeholder="Type a message..." />
+            <textarea 
+              value={text} 
+              onChange={e => setText(e.target.value)} 
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault() // 阻止默认的换行行为
+                  sendMessage()
+                }
+              }}
+              style={{ width: '100%', height: 80 }} 
+              placeholder="Type a message..." 
+            />
             <div style={{ textAlign: 'right', marginTop: 8 }}>
               <button onClick={sendMessage}>Send</button>
             </div>

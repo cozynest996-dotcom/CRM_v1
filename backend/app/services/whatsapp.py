@@ -13,7 +13,7 @@ class WhatsAppService:
     def __init__(self):
         self.gateway_url = settings.WHATSAPP_GATEWAY_URL
     
-    async def send_message(self, phone: str, message: str, user_id: int = None) -> Dict[str, Any]:
+    async def send_message(self, phone: str, message: str, user_id: int = None, media_url: Optional[str] = None, media_type: Optional[str] = None) -> Dict[str, Any]:
         """发送消息（异步版本，用于工作流引擎）"""
         if not user_id:
             logger.error("Cannot send WhatsApp message: user_id is required")
@@ -40,16 +40,29 @@ class WhatsAppService:
             "message": message
         }
         
+        # 添加媒体信息（如果提供）
+        if media_url and media_type:
+            payload["media_url"] = media_url
+            payload["media_type"] = media_type
+        
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {jwt_token}"
         }
         
         url = f"{self.gateway_url}/send"
-        logger.info(f"Sending WhatsApp message to {phone} for user {user_id}")
+        media_info = f" with media ({media_type}: {media_url})" if media_url else ""
+        logger.info(f"Sending WhatsApp message to {phone} for user {user_id}{media_info}")
+        
+        # 添加详细的请求日志
+        logger.info(f"Request URL: {url}")
+        logger.info(f"Request payload: {json.dumps(payload, indent=2)}")
+        logger.info(f"Request headers: {json.dumps({k: v for k, v in headers.items() if k != 'Authorization'}, indent=2)}")
         
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
+            logger.info(f"Response status: {response.status_code}")
+            logger.info(f"Response content: {response.text[:500]}...")
             response.raise_for_status()
             
             data = response.json() if response.content else {}

@@ -3,9 +3,10 @@ AI Service - 集成 OpenAI 进行智能分析和回复生成
 """
 
 import json
+import re
 from openai import OpenAI
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -49,13 +50,107 @@ class AIService:
             logger.error(f"Failed to get user API key: {e}")
             return None
     
+    def _parse_media_identifiers(self, text: str) -> Tuple[str, List[str], List[str]]:
+        """
+        解析文本中的媒体标识符
+        
+        Args:
+            text: 包含媒体标识符的文本
+            
+        Returns:
+            Tuple[str, List[str], List[str]]: (清理后的文本, 媒体文件UUID列表, 文件夹名称列表)
+        """
+        media_uuids = []
+        folder_names = []
+        
+        # 匹配 [[MEDIA:UUID]] 格式
+        media_pattern = r'\[\[MEDIA:([a-f0-9\-]{36})\]\]'
+        media_matches = re.findall(media_pattern, text)
+        media_uuids.extend(media_matches)
+        
+        # 匹配 [[FOLDER:folder_name]] 格式
+        folder_pattern = r'\[\[FOLDER:([^\]]+)\]\]'
+        folder_matches = re.findall(folder_pattern, text)
+        folder_names.extend(folder_matches)
+        
+        # 从文本中移除所有媒体标识符
+        cleaned_text = re.sub(media_pattern, '', text)
+        cleaned_text = re.sub(folder_pattern, '', cleaned_text)
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()  # 清理多余空格
+        
+        return cleaned_text, media_uuids, folder_names
+    
+    async def _get_media_urls_from_db(self, media_uuids: List[str], folder_names: List[str]) -> List[str]:
+        """
+        从数据库获取媒体文件的URL
+        
+        Args:
+            media_uuids: 媒体文件UUID列表
+            folder_names: 文件夹名称列表
+            
+        Returns:
+            List[str]: 媒体文件URL列表
+        """
+        if not self.db_session or not self.user_id:
+            return []
+        
+        try:
+            from app.db.models import MediaFile
+            from app.services import supabase as supabase_service
+            
+            media_urls = []
+            
+            # 获取单个媒体文件
+            if media_uuids:
+                media_files = self.db_session.query(MediaFile).filter(
+                    MediaFile.id.in_(media_uuids),
+                    MediaFile.user_id == self.user_id
+                ).all()
+                
+                for media_file in media_files:
+                    # 只处理图片文件，跳过视频和其他不支持的文件类型
+                    if media_file.file_type and media_file.file_type.startswith("image/"):
+                        # 生成签名URL
+                        relative_path = media_file.filepath.replace(f"{settings.SUPABASE_BUCKET}/", "", 1)
+                        signed_url = await supabase_service.get_signed_url_for_file(relative_path)
+                        if signed_url:
+                            media_urls.append(signed_url)
+                    else:
+                        logger.info(f"Skipping non-image file for AI analysis: {media_file.filename} (type: {media_file.file_type})")
+            
+            # 获取文件夹中的所有媒体文件
+            if folder_names:
+                for folder_name in folder_names:
+                    folder_media = self.db_session.query(MediaFile).filter(
+                        MediaFile.user_id == self.user_id,
+                        MediaFile.folder == folder_name,
+                        MediaFile.filename != ".keep"  # 排除.keep文件
+                    ).all()
+                    
+                    for media_file in folder_media:
+                        # 只处理图片文件，跳过视频和其他不支持的文件类型
+                        if media_file.file_type and media_file.file_type.startswith("image/"):
+                            relative_path = media_file.filepath.replace(f"{settings.SUPABASE_BUCKET}/", "", 1)
+                            signed_url = await supabase_service.get_signed_url_for_file(relative_path)
+                            if signed_url:
+                                media_urls.append(signed_url)
+                        else:
+                            logger.info(f"Skipping non-image file for AI analysis: {media_file.filename} (type: {media_file.file_type})")
+            
+            return media_urls
+            
+        except Exception as e:
+            logger.error(f"Failed to get media URLs from database: {e}")
+            return []
+    
     async def generate_combined_response(
         self, 
         system_prompt: str,
         user_prompt: str,
         model: str = "gpt-4o-mini",
         temperature: float = 0.2,
-        max_tokens: int = 900
+        max_tokens: int = 900,
+        media_settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         生成组合响应（分析 + 回复）
@@ -65,13 +160,27 @@ class AIService:
         try:
             if not self.client:
                 raise ValueError("OpenAI client not initialized - no API key available")
+            
+            # 解析系统提示和用户提示中的媒体标识符
+            cleaned_system_prompt, sys_media_uuids, sys_folder_names = self._parse_media_identifiers(system_prompt)
+            cleaned_user_prompt, user_media_uuids, user_folder_names = self._parse_media_identifiers(user_prompt)
+            
+            # 合并所有媒体标识符
+            all_media_uuids = sys_media_uuids + user_media_uuids
+            all_folder_names = sys_folder_names + user_folder_names
+            
+            # LLM 不需要下载媒体文件，只需要解析标识符并输出到 JSON
+            # 媒体文件的实际处理由 SendWhatsAppMessageProcessor 负责
+            
+            # 构建消息内容（纯文本，不包含媒体）
+            messages = [
+                {"role": "system", "content": cleaned_system_prompt},
+                {"role": "user", "content": cleaned_user_prompt}
+            ]
                 
             response = self.client.chat.completions.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
+                messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
@@ -100,6 +209,10 @@ class AIService:
                     reply["reply_text"] = "Hi! We received your message and will follow up shortly."
                 reply.setdefault("followup_questions", [])
                 reply.setdefault("suggested_tags", [])
+                reply.setdefault("media_uuids", all_media_uuids)
+                reply.setdefault("folder_names", all_folder_names)
+                reply.setdefault("media_urls", [])  # 空列表，实际URL由SendWhatsAppMessageProcessor生成
+                reply.setdefault("media_settings", media_settings or {})
                 
                 # 验证 meta 部分
                 meta = result["meta"]
@@ -157,6 +270,10 @@ class AIService:
                     reply.setdefault("reply_text", content.strip())
                     reply.setdefault("followup_questions", [])
                     reply.setdefault("suggested_tags", [])
+                    reply.setdefault("media_uuids", all_media_uuids)
+                    reply.setdefault("folder_names", all_folder_names)
+                    reply.setdefault("media_urls", [])
+                    reply.setdefault("media_settings", media_settings or {})
 
                     meta = repaired.get("meta", {})
                     meta.setdefault("used_profile", "repaired_json")
@@ -200,6 +317,10 @@ class AIService:
                             reply.setdefault("reply_text", content.strip())
                             reply.setdefault("followup_questions", [])
                             reply.setdefault("suggested_tags", [])
+                            reply.setdefault("media_uuids", all_media_uuids)
+                            reply.setdefault("folder_names", all_folder_names)
+                            reply.setdefault("media_urls", [])
+                            reply.setdefault("media_settings", media_settings or {})
 
                             meta = result2.get("meta", {})
                             meta.setdefault("used_profile", "strict_repair")
@@ -229,7 +350,11 @@ class AIService:
                     "reply": {
                         "reply_text": content.strip(),
                         "followup_questions": [],
-                        "suggested_tags": []
+                        "suggested_tags": [],
+                        "media_uuids": all_media_uuids,
+                        "folder_names": all_folder_names,
+                        "media_urls": [],
+                        "media_settings": media_settings or {}
                     },
                     "meta": {
                         "used_profile": "openai_text_response",
@@ -241,9 +366,11 @@ class AIService:
                 
         except Exception as e:
             logger.error(f"AI service error: {str(e)}")
-            return self._get_default_response(user_prompt)
+            # 在异常情况下，我们需要重新解析媒体标识符
+            _, error_media_uuids, error_folder_names = self._parse_media_identifiers(system_prompt + " " + user_prompt)
+            return self._get_default_response(user_prompt, error_media_uuids, error_folder_names, media_settings)
     
-    def _get_default_response(self, user_prompt: str) -> Dict[str, Any]:
+    def _get_default_response(self, user_prompt: str, media_uuids: List[str] = None, folder_names: List[str] = None, media_settings: Dict[str, Any] = None) -> Dict[str, Any]:
         """获取默认响应（当 AI 调用失败时）"""
         return {
             "analyze": {
@@ -255,7 +382,11 @@ class AIService:
             "reply": {
                 "reply_text": "Hi! We received your message and will follow up shortly.",
                 "followup_questions": [],
-                "suggested_tags": []
+                "suggested_tags": [],
+                "media_uuids": media_uuids or [],
+                "folder_names": folder_names or [],
+                "media_urls": [],  # 空列表，实际URL由SendWhatsAppMessageProcessor生成
+                "media_settings": media_settings or {}
             },
             "meta": {
                 "used_profile": "provisional",

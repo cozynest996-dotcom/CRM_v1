@@ -44,6 +44,7 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     phone = data.get("phone")
     content = data.get("content")
     name = data.get("name", "Unknown")
+    chat_history = data.get("chat_history", [])  # 新增聊天历史字段
     
     # 🔒 首先確定用戶ID
     owner_user_id = data.get("user_id")
@@ -73,7 +74,8 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
         "message": content,
         "name": name,
         "timestamp": datetime.utcnow().isoformat(),
-        "user_id": owner_user_id  # 🔒 包含用戶ID
+        "user_id": owner_user_id,  # 🔒 包含用戶ID
+        "chat_history": chat_history  # 新增聊天历史
     }
 
     try:

@@ -2,28 +2,30 @@ import React, { useState, useEffect } from 'react'
 import { useLanguage } from '../contexts/LanguageContext'
 
 interface CustomField {
-  id: string
+  id: number
   name: string
   fieldKey: string
-  fieldType: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'textarea' | 'image_url'
+  fieldType: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'textarea' | 'image_url' | 'reference'
   isRequired: boolean
   options?: string[]
+  referenceEntityTypeId?: number // For 'reference' type fields
 }
 
 interface CustomEntityRecord {
-  id: string
-  [key: string]: any // Dynamic fields based on CustomField definitions
+  id: number
+  entityTypeId: number
+  data: { [key: string]: any; } // Dynamic fields based on CustomField definitions
 }
 
 interface GenericCustomObjectListProps {
-  entityTypeId: string // The ID of the custom entity type to display
+  entityTypeId: number // The ID of the custom entity type to display
   fields: CustomField[] // The fields defined for this entity type
   records: CustomEntityRecord[]; // 新增：从父组件接收记录数据
   onAddRecord: () => void; // 新增：从父组件接收新增回调
   onEditRecord: (record: CustomEntityRecord) => void; // 新增：从父组件接收编辑回调
   condoUnitRecords?: CustomEntityRecord[]; // 新增：所有公寓单元记录，用于解析引用字段
-  onUpdateRecord?: (recordId: string, fieldKey: string, value: any) => void; // 新增：内联编辑回调
-  onDeleteRecord?: (recordId: string) => void; // 新增：删除记录回调
+  onUpdateRecord?: (recordId: number, fieldKey: string, value: any) => void; // 新增：内联编辑回调
+  onDeleteRecord?: (recordId: number) => void; // 新增：删除记录回调
   onQuickAddRecord?: (data: { [key: string]: any }) => void; // 新增：快速添加记录回调
   onAddField: () => void; // 新增：添加字段回调
   onEditField: (field: CustomField) => void; // 新增：编辑字段回调
@@ -47,7 +49,7 @@ export default function GenericCustomObjectList({
   const { t, language } = useLanguage()
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
-  const [editingCell, setEditingCell] = useState<{ recordId: string; fieldKey: string } | null>(null)
+  const [editingCell, setEditingCell] = useState<{ recordId: number; fieldKey: string } | null>(null)
   const [editValue, setEditValue] = useState<any>('')
   // Removed showQuickAdd state
   // Removed quickAddData state
@@ -64,16 +66,13 @@ export default function GenericCustomObjectList({
   }, [entityTypeId])
 
   // handleDeleteRecord 现在只用于模拟，实际应调用后端API
-  const handleDeleteRecord = (recordId: string) => {
-    if (confirm(language === 'zh' ? `确定要删除此记录吗？` : `Are you sure you want to delete this record?`)) {
-      if (onDeleteRecord) {
-        onDeleteRecord(recordId)
-      }
-      setMessage({ type: 'success', text: language === 'zh' ? '记录删除成功！' : 'Record deleted successfully!' })
+  const handleDeleteRecord = (recordId: number) => {
+    if (onDeleteRecord) {
+      onDeleteRecord(recordId)
     }
   }
 
-  const handleCellEdit = (recordId: string, fieldKey: string, currentValue: any) => {
+  const handleCellEdit = (recordId: number, fieldKey: string, currentValue: any) => {
     setEditingCell({ recordId, fieldKey })
     setEditValue(currentValue || '')
   }
@@ -137,12 +136,13 @@ export default function GenericCustomObjectList({
             ))}
           </select>
         )
-      } else if (field.fieldKey === 'condo_unit_id' && condoUnitRecords) {
+      } else if (field.fieldType === 'reference' && field.referenceEntityTypeId && condoUnitRecords) {
+        // TODO: This currently assumes all reference fields are condo units. Needs to be generalized.
         return (
           <select
             value={editValue}
-            onChange={(e) => setEditValue(e.target.value)}
-            onBlur={handleCellSave} // Add onBlur for auto-save
+            onChange={(e) => setEditValue(e.target.value ? Number(e.target.value) : null)}
+            onBlur={handleCellSave}
             style={{ width: '100%', padding: '2px', border: '1px solid #4299e1', borderRadius: '3px' }}
             autoFocus
             onKeyDown={(e) => {
@@ -152,12 +152,14 @@ export default function GenericCustomObjectList({
               if (e.key === 'Escape') handleCellCancel();
             }}
           >
-            <option value="">{language === 'zh' ? '请选择公寓单元' : 'Select Condo Unit'}</option>
-            {condoUnitRecords.map(unit => (
-              <option key={unit.id} value={unit.id}>
-                {unit.unit_number} ({unit.address})
-              </option>
-            ))}
+            <option value="">{language === 'zh' ? '请选择引用对象' : 'Select Reference'}</option>
+            {condoUnitRecords
+              .filter(unit => unit.entityTypeId === field.referenceEntityTypeId)
+              .map(unit => (
+                <option key={unit.id} value={unit.id}>
+                  {unit.data.unit_number || unit.id}
+                </option>
+              ))}
           </select>
         )
       } else {
@@ -184,9 +186,10 @@ export default function GenericCustomObjectList({
     let displayValue = value
     if (field.fieldType === 'boolean') {
       displayValue = value ? (language === 'zh' ? '是' : 'Yes') : (language === 'zh' ? '否' : 'No')
-    } else if (field.fieldKey === 'condo_unit_id' && condoUnitRecords) {
-      const referencedUnit = condoUnitRecords.find(unit => unit.id === value)
-      displayValue = referencedUnit ? `${referencedUnit.unit_number} (${referencedUnit.address})` : String(value || '')
+    } else if (field.fieldType === 'reference' && field.referenceEntityTypeId && condoUnitRecords) {
+      // TODO: This assumes all reference fields are condo units. Needs to be generalized.
+      const referencedRecord = condoUnitRecords.find(unit => unit.id === value && unit.entityTypeId === field.referenceEntityTypeId)
+      displayValue = referencedRecord ? (referencedRecord.data.name || referencedRecord.data.unit_number || String(referencedRecord.id)) : String(value || '')
     } else {
       displayValue = String(value || '')
     }

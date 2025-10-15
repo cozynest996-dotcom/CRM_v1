@@ -27,7 +27,6 @@ Base = declarative_base()
 def init_db():
     # Import all model modules to register them with Base
     from app.db import models
-    from app.models import custom_objects
     
     print("INFO: Attempting to create database tables...")
     # Create all tables

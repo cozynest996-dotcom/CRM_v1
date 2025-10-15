@@ -5,16 +5,17 @@ import GenericCustomObjectForm from './GenericCustomObjectForm' // 导入表单�
 // import EmojiPicker, { EmojiClickData } from 'emoji-picker-react'; // 移除 EmojiPicker 导入
 
 interface CustomField {
-  id: string
+  id: number
   name: string // Display name, e.g., "价格"
   fieldKey: string // Unique key for data storage, e.g., "price"
-  fieldType: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'textarea' | 'image_url'
+  fieldType: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'textarea' | 'image_url' | 'reference'
   isRequired: boolean
   options?: string[] // For select/multiselect
+  referenceEntityTypeId?: number // For 'reference' type fields
 }
 
 interface CustomEntityType {
-  id: string
+  id: number
   name: string // Display name, e.g., "房源"
   description?: string
   icon?: string // Optional icon for UI
@@ -26,9 +27,13 @@ type InnerView = 'manageRecords' | 'addRecord' | 'editRecord'
 
 // 模拟的自定义对象记录数据
 interface CustomEntityRecord {
-  id: string;
-  entityTypeId: string;
-  [key: string]: any; // Allow arbitrary fields
+  id: number;
+  entityTypeId: number;
+  data: { [key: string]: any; }; // Allow arbitrary fields
+}
+
+interface CustomEntityRecordInList extends CustomEntityRecord {
+  [key: string]: any; // For direct access to flattened data in list view
 }
 
 export default function CustomEntityConfigurationPage() {
@@ -123,7 +128,7 @@ export default function CustomEntityConfigurationPage() {
 
     try {
       const params = new URLSearchParams({
-        entity_type_id: activeEntityType.id,
+        entity_type_id: activeEntityType.id.toString(),
         ...(selectedCondoUnitId && { filter_by_parent_record_id: selectedCondoUnitId }),
         ...(selectedCondoUnitId && { filter_by_parent_field_key: 'condo_unit_id' }), // Assuming 'condo_unit_id' is the field key for the reference
         ...(searchQuery && { search_query: searchQuery }),
@@ -221,7 +226,7 @@ export default function CustomEntityConfigurationPage() {
   }
 
   // 处理内联编辑更新
-  const handleUpdateRecord = async (recordId: string, fieldKey: string, value: any) => {
+  const handleUpdateRecord = async (recordId: number, fieldKey: string, value: any) => {
     if (!activeEntityType) return
     console.log("Attempting to update record:", recordId, "Field Key:", fieldKey, "Value:", value); // 添加这一行
     try {
@@ -259,7 +264,7 @@ export default function CustomEntityConfigurationPage() {
   }
 
   // 处理删除记录
-  const handleDeleteRecord = async (recordId: string) => {
+  const handleDeleteRecord = async (recordId: number) => {
     if (!activeEntityType) return
     if (confirm(language === 'zh' ? `确定要删除此记录吗？` : `Are you sure you want to delete this record?`)) {
       try {
@@ -615,7 +620,7 @@ export default function CustomEntityConfigurationPage() {
 
     const filteredRecords = records.filter(record => {
       if (record.entityTypeId !== activeEntityType.id) return false;
-      if (activeEntityType.id === 'room' && selectedCondoUnitId) {
+      if (activeEntityType.id === 1 && selectedCondoUnitId) { // Assuming 'room' entity type has ID 1
         return record.condo_unit_id === selectedCondoUnitId;
       }
       // 全局搜索过滤
@@ -642,10 +647,10 @@ export default function CustomEntityConfigurationPage() {
       return 0;
     });
 
-    const allCondoUnitRecords = records.filter(r => r.entityTypeId === 'condoUnit');
+    const allCondoUnitRecords = records.filter(r => r.entityTypeId === 2); // Assuming 'condoUnit' entity type has ID 2
 
     // 获取CondoUnit的选项，用于Room的筛选器
-    const condoUnitOptions = activeEntityType.id === 'room' 
+    const condoUnitOptions = activeEntityType.id === 1 
       ? allCondoUnitRecords
       : [];
 
@@ -653,7 +658,7 @@ export default function CustomEntityConfigurationPage() {
       case 'manageRecords':
         return (
           <>
-            {activeEntityType.id === 'room' && (
+            {activeEntityType.id === 1 && (
               <div style={{ marginBottom: '20px' }}>
                 <label htmlFor="condoUnitFilter" style={{ display: 'block', marginBottom: '5px' }}>
                   {language === 'zh' ? '筛选所属公寓单元' : 'Filter by Condo Unit'}
@@ -661,13 +666,13 @@ export default function CustomEntityConfigurationPage() {
                 <select
                   id="condoUnitFilter"
                   value={selectedCondoUnitId || ''}
-                  onChange={(e) => setSelectedCondoUnitId(e.target.value || null)}
+                  onChange={(e) => setSelectedCondoUnitId(e.target.value ? Number(e.target.value) : null)}
                   style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '4px' }}
                 >
                   <option value="">{language === 'zh' ? '所有公寓单元' : 'All Condo Units'}</option>
-                  {records.filter(r => r.entityTypeId === 'condoUnit').map((unit) => (
+                  {allCondoUnitRecords.map((unit) => (
                     <option key={unit.id} value={unit.id}>
-                      {unit.unit_number} ({unit.address})
+                      {unit.data.unit_number || unit.id}
                     </option>
                   ))}
                 </select>
@@ -736,7 +741,7 @@ export default function CustomEntityConfigurationPage() {
             fields={activeEntityType.fields}
             onSave={handleSaveRecord}
             onCancel={handleCancelForm}
-            condoUnitOptions={condoUnitOptions} // 传递公寓单元选项给表单
+            allEntityTypes={entityTypes} // 传递所有实体类型
           />
         )
       case 'editRecord':
@@ -747,7 +752,7 @@ export default function CustomEntityConfigurationPage() {
             initialData={editingRecord}
             onSave={handleSaveRecord}
             onCancel={handleCancelForm}
-            condoUnitOptions={condoUnitOptions} // 传递公寓单元选项给表单
+            allEntityTypes={entityTypes} // 传递所有实体类型
           />
         )
       default:

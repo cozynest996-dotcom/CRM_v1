@@ -2,26 +2,28 @@ import React, { useState, useEffect } from 'react'
 import { useLanguage } from '../contexts/LanguageContext'
 
 interface CustomField {
-  id: string
+  id: number
   name: string
   fieldKey: string
-  fieldType: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'textarea' | 'image_url'
+  fieldType: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'textarea' | 'image_url' | 'reference'
   isRequired: boolean
   options?: string[]
+  referenceEntityTypeId?: number // For 'reference' type fields
 }
 
 interface CustomEntityRecord {
-  id?: string // Optional for new records
-  [key: string]: any
+  id?: number // Optional for new records
+  entityTypeId: number // Make entityTypeId required
+  data: { [key: string]: any; }
 }
 
 interface GenericCustomObjectFormProps {
-  entityTypeId: string
+  entityTypeId: number
   fields: CustomField[]
   initialData?: CustomEntityRecord // Optional, for editing existing records
   onSave: (data: CustomEntityRecord) => void
   onCancel: () => void
-  condoUnitOptions?: CustomEntityRecord[]; // 新增：用于房间类型，提供公寓单元选项
+  allEntityTypes: any[]; // 新增：传递所有实体类型，用于引用字段的选择
 }
 
 export default function GenericCustomObjectForm({
@@ -30,22 +32,24 @@ export default function GenericCustomObjectForm({
   initialData,
   onSave,
   onCancel,
-  condoUnitOptions // 接收公寓单元选项
+  allEntityTypes // 接收所有实体类型
 }: GenericCustomObjectFormProps) {
   const { t, language } = useLanguage()
-  const [formData, setFormData] = useState<CustomEntityRecord>(initialData || {})
+  const [formData, setFormData] = useState<{ [key: string]: any }>(initialData?.data || {})
   const [errors, setErrors] = useState<{[key: string]: string}>({})
 
   useEffect(() => {
     // Initialize form data with default values or empty if not provided
-    const initialForm: CustomEntityRecord = {}
+    const initialForm: { [key: string]: any } = {}
     fields.forEach(field => {
-      if (initialData && initialData[field.fieldKey] !== undefined) {
-        initialForm[field.fieldKey] = initialData[field.fieldKey]
+      if (initialData?.data && initialData.data[field.fieldKey] !== undefined) {
+        initialForm[field.fieldKey] = initialData.data[field.fieldKey]
       } else if (field.fieldType === 'boolean') {
         initialForm[field.fieldKey] = false
       } else if (field.fieldType === 'multiselect') {
         initialForm[field.fieldKey] = []
+      } else if (field.fieldType === 'number') {
+        initialForm[field.fieldKey] = null
       } else {
         initialForm[field.fieldKey] = ''
       }
@@ -62,7 +66,7 @@ export default function GenericCustomObjectForm({
   const validateForm = () => {
     const newErrors: {[key: string]: string} = {}
     fields.forEach(field => {
-      if (field.isRequired && (formData[field.fieldKey] === undefined || formData[field.fieldKey] === '' || (Array.isArray(formData[field.fieldKey]) && formData[field.fieldKey].length === 0))) {
+      if (field.isRequired && (formData[field.fieldKey] === undefined || formData[field.fieldKey] === null || formData[field.fieldKey] === '' || (Array.isArray(formData[field.fieldKey]) && formData[field.fieldKey].length === 0))) {
         newErrors[field.fieldKey] = language === 'zh' ? `${field.name} 是必填项` : `${field.name} is required.`
       }
       // Add more specific validation if needed (e.g., number type, date format)
@@ -74,7 +78,11 @@ export default function GenericCustomObjectForm({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (validateForm()) {
-      onSave(formData)
+      onSave({
+        entityTypeId: entityTypeId,
+        data: formData,
+        ...(initialData && { id: initialData.id }) // Include ID if editing
+      })
     }
   }
 
@@ -94,8 +102,8 @@ export default function GenericCustomObjectForm({
         return (
           <input
             type="number"
-            value={value || ''}
-            onChange={(e) => handleChange(field.fieldKey, e.target.value === '' ? '' : Number(e.target.value))}
+            value={value === null ? '' : value}
+            onChange={(e) => handleChange(field.fieldKey, e.target.value === '' ? null : Number(e.target.value))}
             style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '4px' }}
           />
         )
@@ -127,21 +135,6 @@ export default function GenericCustomObjectForm({
           ></textarea>
         )
       case 'select':
-        // 如果是房间的所属单元字段，则渲染公寓单元的选择器
-        if (field.fieldKey === 'condo_unit_id' && entityTypeId === 'room' && condoUnitOptions) {
-          return (
-            <select
-              value={value || ''}
-              onChange={(e) => handleChange(field.fieldKey, e.target.value)}
-              style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '4px' }}
-            >
-              <option value="">{language === 'zh' ? '请选择公寓单元' : 'Select Condo Unit...'}</option>
-              {condoUnitOptions.map(unit => (
-                <option key={unit.id} value={unit.id}> {unit.unit_number} ({unit.address}) </option>
-              ))}
-            </select>
-          );
-        }
         return (
           <select
             value={value || ''}
@@ -180,6 +173,30 @@ export default function GenericCustomObjectForm({
             style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '4px' }}
           />
         )
+      case 'reference':
+        const referencedEntityType = allEntityTypes.find(et => et.id === field.referenceEntityTypeId);
+        if (!referencedEntityType) {
+          return <p style={{ color: '#e53e3e' }}>{language === 'zh' ? '引用的实体类型未找到' : 'Referenced entity type not found'}</p>;
+        }
+        return (
+          <select
+            value={value === null ? '' : value}
+            onChange={(e) => handleChange(field.fieldKey, e.target.value === '' ? null : Number(e.target.value))}
+            style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '4px' }}
+          >
+            <option value="">{language === 'zh' ? `请选择 ${referencedEntityType.name}` : `Select ${referencedEntityType.name}...`}</option>
+            {/* Assuming we need to fetch records for the referenced entity type. This is a simplification. */}
+            {/* In a real app, you'd fetch records for referencedEntityType.id from the backend. */}
+            {/* For now, we'll assume `allEntityTypes` might contain a `records` property or similar. */}
+            {/* Or, you'd pass a separate prop `referencedEntityRecords` to this component. */}
+            {/* For the current context, we'll leave it as a placeholder and assume records are passed or fetched higher up. */}
+            {/* If `allEntityTypes` had records, it would look like this: */}
+            {/* {referencedEntityType.records?.map((record: any) => (
+              <option key={record.id} value={record.id}>{record.data?.name || record.id}</option>
+            ))}*/}
+            {/* For now, a simple placeholder or a more complex fetch might be needed. */}
+          </select>
+        );
       default:
         return (
           <input

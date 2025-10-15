@@ -1,57 +1,162 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { useLanguage } from '../contexts/LanguageContext'
+import KnowledgeBaseFormModal from './KnowledgeBaseFormModal'
+import { useAuth } from '../hooks/useAuth'
 
-interface ArticleItem {
+interface KnowledgeBaseItem {
   id: string
-  title: string
-  summary: string
-  author: string
-  publishDate: string
+  name: string
+  description?: string
+  content: string
   tags: string[]
+  category: string
+  is_active: boolean
 }
 
 export default function ArticleList() {
   const { t, language } = useLanguage()
-  const [articles, setArticles] = useState<ArticleItem[]>([
-    {
-      id: 'a1',
-      title: language === 'zh' ? 'AI 节点配置指南' : 'AI Node Configuration Guide',
-      summary: language === 'zh' ? '详细介绍如何配置和使用 AI 节点以实现智能回复。' : 'Detailed guide on configuring and using AI nodes for smart replies.',
-      author: 'Admin',
-      publishDate: '2023-10-26',
-      tags: [language === 'zh' ? 'AI' : 'AI', language === 'zh' ? '指南' : 'Guide'],
-    },
-    {
-      id: 'a2',
-      title: language === 'zh' ? '工作流自动化最佳实践' : 'Workflow Automation Best Practices',
-      summary: language === 'zh' ? '分享构建高效自动化工作流的技巧和建议。' : 'Tips and recommendations for building efficient automation workflows.',
-      author: 'Admin',
-      publishDate: '2023-11-15',
-      tags: [language === 'zh' ? '自动化' : 'Automation', language === 'zh' ? '最佳实践' : 'Best Practice'],
-    },
-  ])
+  const [articles, setArticles] = useState<KnowledgeBaseItem[]>([])
   const [searchTerm, setSearchTerm] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [currentEditingItem, setCurrentEditingItem] = useState<KnowledgeBaseItem | undefined>(undefined)
+  const { token } = useAuth()
+
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'
+
+  const fetchArticles = async () => {
+    setLoading(true)
+    setError(null)
+    if (!token) {
+      setError(language === 'zh' ? '用户未认证，请重新登录。' : 'User not authenticated, please log in again.')
+      setLoading(false)
+      return
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/knowledge-base?category=article&is_active=true`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      })
+      if (!response.ok) {
+        throw new Error(language === 'zh' ? '无法获取文章数据。' : 'Failed to fetch article data.')
+      }
+      const data: KnowledgeBaseItem[] = await response.json()
+      setArticles(data)
+    } catch (err: any) {
+      setError(err.message || (language === 'zh' ? '加载文章失败。' : 'Failed to load articles.'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchArticles()
+  }, [language])
 
   const filteredArticles = articles.filter(
     (article) =>
-      article.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      article.summary.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      article.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      article.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      article.content.toLowerCase().includes(searchTerm.toLowerCase()) ||
       article.tags.some((tag) => tag.toLowerCase().includes(searchTerm.toLowerCase()))
   )
 
   const handleAddArticle = () => {
-    // TODO: 实现添加文章的逻辑，例如跳转到富文本编辑器页面
-    alert(language === 'zh' ? '添加文章功能待实现' : 'Add Article feature not implemented yet')
+    setCurrentEditingItem(undefined)
+    setIsModalOpen(true)
   }
 
   const handleEditArticle = (id: string) => {
-    // TODO: 实现编辑文章的逻辑
-    alert(`${language === 'zh' ? '编辑文章' : 'Edit Article'} ${id} ${language === 'zh' ? '功能待实现' : 'feature not implemented yet'}`)
+    const itemToEdit = articles.find(article => article.id === id)
+    if (itemToEdit) {
+      setCurrentEditingItem(itemToEdit)
+      setIsModalOpen(true)
+    }
   }
 
-  const handleDeleteArticle = (id: string) => {
+  interface KnowledgeBaseCreateUpdate {
+    name: string
+    description?: string
+    content: string
+    tags: string[]
+    category: string
+    is_active: boolean
+  }
+
+  const handleSaveItem = async (item: KnowledgeBaseCreateUpdate) => {
+    if (!token) {
+      alert(language === 'zh' ? '用户未认证，请重新登录。' : 'User not authenticated, please log in again.')
+      return
+    }
+
+    setLoading(true)
+    try {
+      let response
+      if (currentEditingItem) {
+        response = await fetch(`${API_BASE_URL}/api/knowledge-base/${currentEditingItem.id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify(item),
+        })
+      } else {
+        response = await fetch(`${API_BASE_URL}/api/knowledge-base/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify(item),
+        })
+      }
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || (language === 'zh' ? '保存文章失败。' : 'Failed to save article.'))
+      }
+
+      alert(language === 'zh' ? '文章保存成功！' : 'Article saved successfully!')
+      setIsModalOpen(false)
+      fetchArticles() // Refresh the list
+    } catch (err: any) {
+      console.error("Error saving article:", err)
+      alert(err.message || (language === 'zh' ? '保存文章失败。' : 'Failed to save article.'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDeleteArticle = async (id: string) => {
     if (confirm(language === 'zh' ? '确定要删除此文章吗？' : 'Are you sure you want to delete this article?')) {
-      setArticles(articles.filter((article) => article.id !== id))
+      if (!token) {
+        alert(language === 'zh' ? '用户未认证，请重新登录。' : 'User not authenticated, please log in again.')
+        return
+      }
+ 
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/knowledge-base/${id}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        })
+ 
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || (language === 'zh' ? '删除文章失败。' : 'Failed to delete article.'))
+        }
+ 
+        alert(language === 'zh' ? '文章删除成功！' : 'Article deleted successfully!')
+        fetchArticles() // Refresh the list after deletion
+      } catch (err: any) {
+        console.error("Error deleting article:", err)
+        alert(err.message || (language === 'zh' ? '删除文章失败。' : 'Failed to delete article.'))
+      }
     }
   }
 
@@ -79,10 +184,17 @@ export default function ArticleList() {
         </button>
       </div>
 
+      <KnowledgeBaseFormModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onSave={handleSaveItem}
+        initialData={currentEditingItem}
+        category="article"
+      />
       <div style={{ marginBottom: '20px' }}>
         <input
           type="text"
-          placeholder={language === 'zh' ? '搜索文章标题、摘要或标签...' : 'Search article titles, summaries or tags...'}
+          placeholder={language === 'zh' ? '搜索文章标题、描述、内容或标签...' : 'Search article titles, descriptions, content or tags...'}
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           style={{
@@ -97,7 +209,15 @@ export default function ArticleList() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-        {filteredArticles.length > 0 ? (
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: '#718096', fontSize: '16px' }}>
+            {language === 'zh' ? '加载中...' : 'Loading...'}
+          </div>
+        ) : error ? (
+          <div style={{ textAlign: 'center', padding: '40px', color: '#fc8181', fontSize: '16px' }}>
+            {error}
+          </div>
+        ) : filteredArticles.length > 0 ? (
           filteredArticles.map((article) => (
             <div
               key={article.id}
@@ -110,16 +230,8 @@ export default function ArticleList() {
               }}
             >
               <div style={{ padding: '15px 20px' }}>
-                <h3 style={{ fontSize: '18px', color: '#2d3748', marginBottom: '5px' }}>{article.title}</h3>
-                <p style={{ fontSize: '14px', color: '#718096', marginBottom: '10px' }}>{article.summary}</p>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                  <span style={{ fontSize: '12px', color: '#a0aec0' }}>
-                    {language === 'zh' ? '作者:' : 'Author:'} {article.author}
-                  </span>
-                  <span style={{ fontSize: '12px', color: '#a0aec0' }}>
-                    {language === 'zh' ? '发布日期:' : 'Published:'} {article.publishDate}
-                  </span>
-                </div>
+                <h3 style={{ fontSize: '18px', color: '#2d3748', marginBottom: '5px' }}>{article.name}</h3>
+                {article.description && <p style={{ fontSize: '14px', color: '#718096', marginBottom: '10px' }}>{article.description}</p>}
                 <div style={{ display: 'flex', gap: '8px', marginBottom: '15px' }}>
                   {article.tags.map((tag) => (
                     <span
@@ -170,8 +282,38 @@ export default function ArticleList() {
             </div>
           ))
         ) : (
-          <div style={{ textAlign: 'center', padding: '40px', color: '#718096', fontSize: '16px' }}>
-            {language === 'zh' ? '🔍 暂无文章或文档' : '🔍 No articles or documents found'}
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: '200px',
+            backgroundColor: '#f8fafc',
+            border: '1px dashed #cbd5e0',
+            borderRadius: '8px',
+            padding: '20px',
+            color: '#718096',
+            fontSize: '16px',
+            textAlign: 'center',
+          }}>
+            <span style={{ fontSize: '48px', marginBottom: '10px' }}>📚</span>
+            <p style={{ margin: '0 0 10px 0' }}>{language === 'zh' ? '暂无文章或文档，点击上方按钮新建第一篇文章。' : 'No articles or documents yet. Click the button above to create your first article.'} </p>
+            <button
+              onClick={handleAddArticle}
+              style={{
+                padding: '8px 15px',
+                backgroundColor: '#4299e1',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '600',
+                boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+              }}
+            >
+              + {language === 'zh' ? '新建文章' : 'New Article'}
+            </button>
           </div>
         )}
       </div>

@@ -34,7 +34,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     
     if (tokenFromUrl) {
       // 如果URL中有token，保存并使用它
-      localStorage.setItem('auth_token', tokenFromUrl);
+      localStorage.setItem('token', tokenFromUrl);
       setToken(tokenFromUrl);
       fetchUser(tokenFromUrl);
       
@@ -43,7 +43,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.history.replaceState({}, '', newUrl);
     } else {
       // 否则尝试从localStorage获取token
-      const savedToken = localStorage.getItem('auth_token')
+      const savedToken = localStorage.getItem('token')
       if (savedToken) {
         setToken(savedToken)
         fetchUser(savedToken)
@@ -75,7 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.error('Auth error:', response.status, errorData)
         
         // 清除无效token
-        localStorage.removeItem('auth_token')
+        localStorage.removeItem('token')
         setToken(null)
         setUser(null)
         
@@ -86,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } catch (error) {
       console.error('Failed to fetch user:', error)
-      localStorage.removeItem('auth_token')
+      localStorage.removeItem('token')
       setToken(null)
       setUser(null)
       router.push('/login')
@@ -96,13 +96,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const login = (newToken: string) => {
-    localStorage.setItem('auth_token', newToken)
+    localStorage.setItem('token', newToken)
     setToken(newToken)
     fetchUser(newToken)
   }
 
   const logout = () => {
-    localStorage.removeItem('auth_token')
+    localStorage.removeItem('token')
     setToken(null)
     setUser(null)
     router.push('/login')

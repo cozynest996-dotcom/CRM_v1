@@ -11,21 +11,24 @@
  * - 本组件只负责 UI 层配置，不会直接发起网络请求或修改数据库。
  * - 在将数据发送到后端前，父组件应对 data 做序列化/清理（例如移除 React 元素或函数引用）。
  */
-import React, { useState, useEffect } from 'react'
-import { Node } from 'reactflow'
+import React, { useState, useEffect, useRef } from 'react'
+import { Node as RFNode } from 'reactflow'
 import api from '../utils/api'
+import { PlayCircleOutlined } from '@ant-design/icons' // 导入 PlayCircleOutlined 图标
+import PromptFormModal, { Prompt } from './PromptFormModal' // 导入 PromptFormModal 和 Prompt 接口
 
 interface NodeConfigProps {
-  node: Node
+  node: RFNode
   onUpdate: (nodeId: string, data: any) => void
   onClose: () => void
 }
 
 export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps) {
-  const [showVariableSelector, setShowVariableSelector] = useState<{show: boolean, position?: string}>({ show: false })
-  const [showMediaSelector, setShowMediaSelector] = useState<{show: boolean, position?: string}>({ show: false })
+  const [showVariableSelector, setShowVariableSelector] = useState<{show: boolean, position?: string, anchor?: { left: number, top: number }} >({ show: false })
+  const [showMediaSelector, setShowMediaSelector] = useState<{show: boolean, position?: string, anchor?: { left: number, top: number }} >({ show: false })
+  const [showPromptPreview, setShowPromptPreview] = useState(false) // 新增：显示 prompt 预览
+  const [showPromptEditor, setShowPromptEditor] = useState(false) // 新增：显示 prompt 编辑器
   const [localData, setLocalData] = useState<any>(node.data || {})
-  const [showPromptPreview, setShowPromptPreview] = useState(false)
   const [compiledPromptText, setCompiledPromptText] = useState<string>('')
   const [showHeadersPanel, setShowHeadersPanel] = useState(false)
   const [availableHeaders, setAvailableHeaders] = useState<string[] | null>(null)
@@ -36,6 +39,85 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const [loadingMedia, setLoadingMedia] = useState(false)
   const [expandedFolder, setExpandedFolder] = useState<string | null>(null)
   const [folderMediaList, setFolderMediaList] = useState<any[]>([])
+  const [promptLibrary, setPromptLibrary] = useState<any[]>([]) // 新增：AI 提示词库
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null) // 新增：当前选中的 Prompt ID
+  const [customEntityTypes, setCustomEntityTypes] = useState<any[]>([]) // 新增：自定义实体类型列表
+  const [selectedCustomEntityTypeId, setSelectedCustomEntityTypeId] = useState<number | null>(null) // 新增：选中的自定义实体类型ID
+  const [selectedCustomEntityRecordId, setSelectedCustomEntityRecordId] = useState<number | null>(null) // 新增：选中的自定义实体记录ID
+  const [customEntityRecords, setCustomEntityRecords] = useState<any[]>([]) // 新增：特定实体类型下的记录
+  const [showSaveNotification, setShowSaveNotification] = useState<string | null>(null)
+  const [showKnowledgeBaseSelector, setShowKnowledgeBaseSelector] = useState<{show: boolean, position?: string, anchor?: { left: number, top: number }} >({ show: false })
+  const [knowledgeBases, setKnowledgeBases] = useState<any[]>([]) // 新增：知识库列表
+
+  // 打开变量选择器并锚定到触发元素位置
+  const openVariableSelector = (e: any, position?: string) => {
+    try {
+      const rect = e?.currentTarget?.getBoundingClientRect?.();
+      const anchor = rect ? { left: rect.left + window.scrollX, top: rect.bottom + window.scrollY } : undefined;
+      setShowVariableSelector({ show: true, position: position, ...(anchor ? { anchor } : {}) });
+    } catch (err) {
+      setShowVariableSelector({ show: true, position: position });
+    }
+  }
+
+  // 打开媒体选择器并锚定到触发元素位置
+  const openMediaSelector = (e: any, position?: string) => {
+    try {
+      const rect = e?.currentTarget?.getBoundingClientRect?.();
+      const anchor = rect ? { left: rect.left + window.scrollX, top: rect.bottom + window.scrollY } : undefined;
+      setShowMediaSelector({ show: true, position: position, ...(anchor ? { anchor } : {}) });
+    } catch (err) {
+      setShowMediaSelector({ show: true, position: position });
+    }
+  }
+
+  // refs for popovers so we can close when clicking outside
+  const variablePopoverRef = useRef<HTMLDivElement | null>(null);
+  const mediaPopoverRef = useRef<HTMLDivElement | null>(null);
+  const knowledgeBasePopoverRef = useRef<HTMLDivElement | null>(null);
+
+  // close popovers when clicking outside
+  useEffect(() => {
+    if (!showVariableSelector.show && !showMediaSelector.show) return;
+    const handler = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node;
+      if (variablePopoverRef.current && variablePopoverRef.current.contains(target)) return;
+      if (mediaPopoverRef.current && mediaPopoverRef.current.contains(target)) return;
+      if (knowledgeBasePopoverRef.current && knowledgeBasePopoverRef.current.contains(target)) return;
+      // clicked outside
+      setShowVariableSelector({ show: false });
+      setShowMediaSelector({ show: false });
+      setShowKnowledgeBaseSelector({ show: false });
+    };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('touchstart', handler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+  }, [showVariableSelector.show, showMediaSelector.show, showKnowledgeBaseSelector.show]);
+
+  // 新增：获取自定义实体类型
+  async function fetchCustomEntityTypes() {
+    try {
+      const response = await api.get('/api/custom-objects/custom-entity-types/');
+      setCustomEntityTypes(response || []);
+    } catch (error) {
+      console.error('Error fetching custom entity types:', error);
+      setCustomEntityTypes([]);
+    }
+  }
+
+  // 新增：获取特定实体类型下的记录
+  async function fetchCustomEntityRecords(entityTypeId: number) {
+    try {
+      const response = await api.get(`/api/custom-objects/${entityTypeId}/records`); // 假设存在此 API
+      setCustomEntityRecords(response || []);
+    } catch (error) {
+      console.error(`Error fetching records for entity type ${entityTypeId}:`, error);
+      setCustomEntityRecords([]);
+    }
+  }
 
   async function fetchAvailableHeaders() {
     // 如果已有字段且非空，则不用重复请求；如果为空数组则仍尝试重新获取（可能之前未认证或无数据，刷新后可能有变化）
@@ -109,6 +191,20 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   // 当 node.data 变化时更新本地状态 (来自父组件的更新)
   useEffect(() => {
     setLocalData(node.data || {})
+    // 如果 node.data 包含 promptLibrary 和 selectedPromptId，则更新状态
+    if (node.data?.promptLibrary) {
+      setPromptLibrary(node.data.promptLibrary);
+    }
+    if (node.data?.selectedPromptId) {
+      setSelectedPromptId(node.data.selectedPromptId);
+    }
+    // 新增：如果 node.data 包含自定义实体类型和记录信息，则更新状态
+    if (node.data?.selectedCustomEntityTypeId) {
+      setSelectedCustomEntityTypeId(node.data.selectedCustomEntityTypeId);
+    }
+    if (node.data?.selectedCustomEntityRecordId) {
+      setSelectedCustomEntityRecordId(node.data.selectedCustomEntityRecordId);
+    }
   }, [node.data])
 
   // 当打开 Condition 配置时，自动加载阶段列表，便于直接下拉选择阶段名称
@@ -128,12 +224,122 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       fetchStages();
     }
   }, [node.type]);
+
+  // 新增：当节点类型为 AI 时，加载 AI 提示词库和自定义实体类型
+  useEffect(() => {
+    if (node.type === 'AI') {
+      const fetchPromptLibrary = async () => {
+        try {
+          const response = await api.get('/api/prompt-library'); // 假设存在此 API
+          setPromptLibrary(response || []);
+        } catch (error) {
+          console.error('Error fetching prompt library:', error);
+          setPromptLibrary([]);
+        }
+      };
+      fetchPromptLibrary();
+      fetchCustomEntityTypes(); // 在 AI 节点类型时获取自定义实体类型
+      const fetchKnowledgeBases = async () => {
+        try {
+          const response = await api.get('/api/knowledge-base/');
+          setKnowledgeBases(response || []);
+        } catch (error) {
+          console.error('Error fetching knowledge bases:', error);
+          setKnowledgeBases([]);
+        }
+      };
+      fetchKnowledgeBases();
+    }
+  }, [node.type])
+
+  // 新增：当选中的自定义实体类型变化时，加载其对应的记录
+  useEffect(() => {
+    if (selectedCustomEntityTypeId) {
+      fetchCustomEntityRecords(selectedCustomEntityTypeId);
+    } else {
+      setCustomEntityRecords([]); // 如果没有选择实体类型，则清空记录
+    }
+  }, [selectedCustomEntityTypeId]);
+
+  // 当 promptLibrary 或 selectedPromptId 变化时，自动更新节点数据
+  useEffect(() => {
+    if (node.type === 'AI') {
+      updateNodeData({});
+    }
+  }, [promptLibrary, selectedPromptId, selectedCustomEntityTypeId, selectedCustomEntityRecordId]);
   
   const updateNodeData = (updates: any) => {
-    const newData = { ...localData, ...updates }
+    // 如果有选中的 prompt，将其内容同步到 localData，以便工作流执行时使用
+    const currentPrompt = promptLibrary.find((p: any) => p.id === selectedPromptId);
+    const newData = { 
+      ...localData, 
+      ...updates, 
+      promptLibrary: promptLibrary, // 保存整个提示词库
+      selectedPromptId: selectedPromptId, // 保存当前选中的 Prompt ID
+      // 同步选中的 prompt 内容到 localData，以便工作流执行时使用
+      system_prompt: currentPrompt?.system_prompt || localData.system_prompt || '',
+      user_prompt: currentPrompt?.user_prompt || localData.user_prompt || '',
+      // 新增：保存选中的自定义实体类型和记录 ID
+      selectedCustomEntityTypeId: selectedCustomEntityTypeId,
+      selectedCustomEntityRecordId: selectedCustomEntityRecordId,
+    }
     setLocalData(newData)
     onUpdate(node.id, newData)
   }
+
+  const handleVariableSelect = (variableValue: string) => {
+    let finalVariableValue = variableValue;
+    // 如果变量是自定义实体记录字段，则替换 recordId 占位符
+    if (variableValue.includes('.recordId.') && selectedCustomEntityRecordId) {
+      const entityTypeIdMatch = variableValue.match(/{{custom_object\.(\d+)\.recordId\.(.*)}}/);
+      if (entityTypeIdMatch) {
+        finalVariableValue = `{{custom_object.${entityTypeIdMatch[1]}.${selectedCustomEntityRecordId}.${entityTypeIdMatch[2]}}}`;
+      }
+    } else if (variableValue.includes('.all') && variableValue.includes('custom_object') && selectedCustomEntityTypeId) {
+      // 如果是 {{custom_object.entityTypeId.all}} 形式，则替换 entityTypeId
+      const entityTypeIdMatch = variableValue.match(/{{custom_object\.(\d+)\.all}}/);
+      if (entityTypeIdMatch) {
+        finalVariableValue = `{{custom_object.${selectedCustomEntityTypeId}.all}}`;
+      }
+    }
+
+    if (showVariableSelector.position === 'fallback') {
+      const currentTemplate = localData.fallback_template || '';
+      const newTemplate = currentTemplate + finalVariableValue;
+      updateNodeData({ fallback_template: newTemplate });
+    } else if (showVariableSelector.position === 'system_prompt') {
+      if (selectedPromptId) {
+        setPromptLibrary(promptLibrary.map((p: any) => 
+          p.id === selectedPromptId 
+            ? { ...p, system_prompt: (p.system_prompt || '') + finalVariableValue }
+            : p
+        ));
+      } else {
+        const currentPrompt = localData.system_prompt || '';
+        const newPrompt = currentPrompt + finalVariableValue;
+        updateNodeData({ system_prompt: newPrompt });
+      }
+    } else if (showVariableSelector.position === 'user_prompt') {
+      if (selectedPromptId) {
+        setPromptLibrary(promptLibrary.map((p: any) => 
+          p.id === selectedPromptId 
+            ? { ...p, user_prompt: (p.user_prompt || '') + finalVariableValue }
+            : p
+        ));
+      } else {
+        const currentPrompt = localData.user_prompt || '';
+        const newPrompt = currentPrompt + finalVariableValue;
+        updateNodeData({ user_prompt: newPrompt });
+      }
+    } else {
+      const variables = localData.variables || {};
+      if (showVariableSelector.position) {
+        variables[showVariableSelector.position] = finalVariableValue;
+        updateNodeData({ variables });
+      }
+    }
+    setShowVariableSelector({ show: false });
+  };
 
   // 方便渲染：首选 availableHeaders，其次 node.data 提供的可用字段
   const headerList: string[] = availableHeaders ?? ((localData.data && localData.data.availableHeaders) || localData.availableHeaders || [])
@@ -183,68 +389,72 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       </div>
 
       <div className="config-field">
-        <label>System Prompt（系统提示）</label>
-        <div>
-          <textarea
-            value={localData.system_prompt || ''}
-            onChange={(e) => updateNodeData({ system_prompt: e.target.value })}
-            placeholder="你是一个专业的CRM智能助手，负责理解客户意图并生成结构化JSON。"
-            rows={4}
-            style={{ width: '100%' }}
-          />
-
-          <div className="prompt-actions">
-            <button
-              className="small-action-button"
-              onClick={() => setShowVariableSelector({ show: true, position: 'system_prompt' })}
-            >
-              @变量
-            </button>
+        <label>选择或创建 AI Prompt</label>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <select
+            value={selectedPromptId || ''}
+            onChange={(e) => setSelectedPromptId(e.target.value)}
+            style={{ flex: 1 }}
+          >
+            <option value="">-- 新建 Prompt --</option>
+            {promptLibrary.map((prompt: any) => (
+              <option key={prompt.id} value={prompt.id}>
+                {prompt.name}
+              </option>
+            ))}
+          </select>
             <button
               className="small-action-button"
               onClick={() => {
-                setShowMediaSelector({ show: true, position: 'system_prompt' })
-                fetchMediaData()
-              }}
-              style={{ marginLeft: '8px' }}
-            >
-              📷媒体
+              // TODO: Logic to create a new prompt in the library
+              const newPrompt = {
+                id: Date.now().toString(),
+                _local: true,
+                name: `新 Prompt ${promptLibrary.length + 1}`,
+                description: '',
+                system_prompt: '',
+                user_prompt: '',
+              }
+              setPromptLibrary([...promptLibrary, newPrompt]);
+              setSelectedPromptId(newPrompt.id);
+            }}
+          >
+            新建
             </button>
-          </div>
         </div>
       </div>
 
+      {/* 预览按钮 */}
+      {selectedPromptId && promptLibrary.find((p: any) => p.id === selectedPromptId) && (
       <div className="config-field">
-        <label>User Prompt（用户提示模板）</label>
-        <div>
-          <textarea
-            value={localData.user_prompt || ''}
-            onChange={(e) => updateNodeData({ user_prompt: e.target.value })}
-            placeholder="客户说：{{trigger.content}}。请以固定JSON格式输出分析结果。"
-            rows={5}
-            style={{ width: '100%' }}
-          />
-
-          <div className="prompt-actions">
             <button
               className="small-action-button"
-              onClick={() => setShowVariableSelector({ show: true, position: 'user_prompt' })}
-            >
-              @变量
-            </button>
-            <button
-              className="small-action-button"
-              onClick={() => {
-                setShowMediaSelector({ show: true, position: 'user_prompt' })
-                fetchMediaData()
-              }}
-              style={{ marginLeft: '8px' }}
-            >
-              📷媒体
+            onClick={() => setShowPromptPreview(true)}
+            style={{ 
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', 
+              color: 'white',
+              width: '100%',
+              padding: '12px',
+              fontSize: '14px',
+              fontWeight: '600'
+            }}
+          >
+            🔍 预览完整 Prompt
             </button>
           </div>
+      )}
+
+      {selectedPromptId && promptLibrary.find((p: any) => p.id === selectedPromptId) ? (
+        <>
+          {/* Prompt 名称/描述 已移入编辑模态（避免主配置面板拥挤） */}
+
+          {/* Prompt 的编辑/删除操作已移除；请在 AI Prompt Library 页面或预览中管理 Prompt */}
+        </>
+      ) : (
+        <div className="config-field">
+          <p style={{ color: '#666', textAlign: 'center' }}>请选择一个 Prompt 或点击 "新建" 创建。</p>
         </div>
-      </div>
+      )}
 
       <div className="config-field">
         <label>温度 (0-1)</label>
@@ -381,18 +591,6 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         </div>
       </div>
 
-      <div className="config-field">
-        <button
-          onClick={() => {
-            const compiled = compilePromptForPreview()
-            setCompiledPromptText(compiled)
-            setShowPromptPreview(true)
-          }}
-          className="small-action-button primary"
-        >
-          预览完整 Prompt
-        </button>
-      </div>
 
       {/* 聊天历史配置 */}
       <div className="config-field">
@@ -1149,7 +1347,10 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                     placeholder="选择变量或输入文本"
                   />
                   <button
-                    onClick={() => setShowVariableSelector({ show: true, position: key })}
+                    onClick={() => {
+                      setShowVariableSelector({ show: true, position: key })
+                      fetchCustomerFields() // 获取最新的客户字段
+                    }}
                     className="variable-button select"
                   >
                     @
@@ -1202,7 +1403,10 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           <div className="prompt-actions">
             <button
               className="small-action-button"
-              onClick={() => setShowVariableSelector({ show: true, position: 'fallback' })}
+                  onClick={() => {
+                    setShowVariableSelector({ show: true, position: 'fallback' })
+                    fetchCustomerFields() // 获取最新的客户字段
+                  }}
             >
               @变量
             </button>
@@ -1592,51 +1796,138 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   }
 
   function compilePromptForPreview() {
-    const system = localData.system_prompt || (localData.data && localData.data.prompts && localData.data.prompts.system) || ''
-    const user = localData.user_prompt || (localData.data && localData.data.prompts && localData.data.prompts.user_template) || ''
-    const combined = `=== System Prompt ===\n${system}\n\n=== User Prompt ===\n${user}`
+    const currentPrompt = promptLibrary.find((p: any) => p.id === selectedPromptId);
+    const system = currentPrompt?.system_prompt || '';
+    const user = currentPrompt?.user_prompt || '';
+    const combined = `=== System Prompt ===\n${system}\n\n=== User Prompt ===\n${user}`;
 
-    const vars = localData.variables || {}
+    const vars = localData.variables || {};
     return combined.replace(/\{\{\s*([^}]+)\s*\}\}/g, (_m: string, key: string) => {
-      if (Object.prototype.hasOwnProperty.call(vars, key)) return String(vars[key])
-      return `<${key}>`
-    })
+      if (Object.prototype.hasOwnProperty.call(vars, key)) return String(vars[key]);
+      return `<${key}>`;
+    });
   }
 
-  // 预定义的变量选项
-  const availableVariables = {
+  // 动态变量选项 - 从后端获取
+  const [availableVariables, setAvailableVariables] = useState<any>({
     '触发器数据': [
       { label: '发送者姓名', value: '{{trigger.name}}', description: '发送消息的用户姓名' },
       { label: '发送者电话', value: '{{trigger.phone}}', description: '发送消息的用户电话号码' },
+      { label: '发送者邮箱', value: '{{trigger.email}}', description: '发送消息的用户邮箱' },
       { label: '消息内容', value: '{{trigger.content}}', description: '用户发送的原始消息内容' },
+      { label: '消息类型', value: '{{trigger.message_type}}', description: '消息类型（文本/图片/视频等）' },
       { label: '时间戳', value: '{{trigger.timestamp}}', description: '消息发送的时间' },
+      { label: '触发器ID', value: '{{trigger.id}}', description: '触发器的唯一标识' },
+      { label: '消息来源', value: '{{trigger.source}}', description: '消息来源平台（WhatsApp/Telegram等）' },
     ],
-    '客户数据库': [
-      { label: '客户姓名', value: '{{db.customer.name}}', description: '数据库中的客户姓名' },
-      { label: '客户电话', value: '{{db.customer.phone}}', description: '数据库中的客户电话' },
-      { label: '客户状态', value: '{{db.customer.status}}', description: '客户的当前状态' },
-      { label: '客户邮箱', value: '{{db.customer.email}}', description: '客户的邮箱地址' },
-      { label: '客户来源', value: '{{db.customer.source}}', description: '客户的来源渠道' },
+    '客户基础信息': [
+      { label: '所有客户信息', value: '{{customer.all}}', description: '包含所有客户基础和自定义字段的信息' },
     ],
-    'AI 分析': [
-      { label: 'AI 回复', value: '{{ai.reply}}', description: 'AI 生成的回复内容' },
-      { label: 'AI 分析结果', value: '{{ai.analysis}}', description: 'AI 对消息的分析结果' },
-      { label: '意图识别', value: '{{ai.intent}}', description: 'AI 识别的用户意图' },
-      { label: '情感分析', value: '{{ai.sentiment}}', description: 'AI 分析的情感倾向' },
-    ]
+    '客户自定义字段': [],
+  })
+
+  useEffect(() => {
+    fetchCustomerFields()
+    // 新增：处理自定义实体类型变量
+    if (customEntityTypes.length > 0) {
+      setAvailableVariables((prev: any) => {
+        const newVars = { ...prev };
+        customEntityTypes.forEach((entityType) => {
+          const categoryName = `${entityType.name} 记录`;
+          // 添加一个变量来选择整个记录
+          const allRecordVar = { 
+            label: `所有 ${entityType.name} 信息`, 
+            value: `{{custom_object.${entityType.id}.all}}`, 
+            description: `包含所有 ${entityType.name} 记录信息` 
+          };
+          newVars[categoryName] = [allRecordVar];
+
+          entityType.fields.forEach((field: any) => {
+            newVars[categoryName].push({
+              label: `${field.name} (${field.field_key})`,
+              value: `{{custom_object.${entityType.id}.recordId.${field.field_key}}}`, // 占位符 recordId，后续用户选择
+              description: `${entityType.name} 的 ${field.name} 字段`
+            });
+          });
+        });
+        return newVars;
+      });
+    }
+  }, [customEntityTypes])
+
+  // 获取客户字段数据
+  const fetchCustomerFields = async () => {
+    try {
+      const response = await api.get('/api/customers/fields/detailed')
+      console.log('Fetched customer fields:', response)
+      
+      // 更新变量选择器中的客户相关数据
+      setAvailableVariables((prev: any) => ({
+        ...prev,
+        '客户基础信息': response.basic_fields || [],
+        '客户自定义字段': response.custom_fields || []
+      }))
+    } catch (error) {
+      console.error('Failed to fetch customer fields:', error)
+    }
   }
 
+  const fetchKnowledgeBases = async () => {
+    try {
+      const response = await api.get('/api/knowledge-base/');
+      setKnowledgeBases(response || []);
+    } catch (error) {
+      console.error('Error fetching knowledge bases:', error);
+      setKnowledgeBases([]);
+    }
+  };
+
+  const openKnowledgeBaseSelector = async (e: any, position?: string) => {
+    try {
+      const rect = e?.currentTarget?.getBoundingClientRect?.();
+      const anchor = rect ? { left: rect.left + window.scrollX, top: rect.bottom + window.scrollY } : undefined;
+      try {
+        const resp = await api.get('/api/knowledge-base/');
+        setKnowledgeBases(resp || []);
+      } catch (err) {
+        console.error('Error fetching knowledge bases on open:', err);
+        setKnowledgeBases([]);
+      }
+      setShowKnowledgeBaseSelector({ show: true, position: position, ...(anchor ? { anchor } : {}) });
+    } catch (err) {
+      setShowKnowledgeBaseSelector({ show: true, position: position });
+    }
+  };
+
   return (
-    <div className="node-config-panel">
-      <h3>配置节点: {node.type}</h3>
-      <div className="config-fields">
+      <div className="node-config-panel" style={{ 
+        background: '#ffffff', 
+        borderRadius: '16px', 
+        boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+        border: '1px solid #e2e8f0'
+      }}>
+        <h3 style={{ 
+          background: '#ffffff', 
+          margin: 0, 
+          padding: '20px 24px', 
+          borderBottom: '1px solid #e2e8f0',
+          borderRadius: '16px 16px 0 0'
+        }}>
+          配置节点: {node.type}
+        </h3>
+        <div className="config-fields" style={{ 
+          background: '#ffffff', 
+          padding: '24px', 
+          flex: 1, 
+          overflowY: 'auto' 
+        }}>
         {renderConfigFields()}
       </div>
       <div className="config-actions">
         <button onClick={onClose}>关闭</button>
       </div>
 
-      {/* 变量选择器弹窗 */}
+      {/* 变量选择器弹窗 - 美化版本 */}
       {showVariableSelector.show && (
         <div style={{
           position: 'fixed',
@@ -1644,122 +1935,375 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          backgroundColor: 'rgba(0, 0, 0, 0.0)',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 2000
+          alignItems: 'flex-start',
+          justifyContent: 'flex-start',
+          zIndex: 2300,
+          pointerEvents: 'none'
         }}>
-          <div style={{
-            backgroundColor: 'white',
-            borderRadius: '8px',
-            padding: '20px',
-            width: '500px',
-            maxHeight: '70vh',
+          <div ref={variablePopoverRef} style={{
+            pointerEvents: 'auto',
+            background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+            borderRadius: '12px',
+            padding: '12px',
+            width: '360px',
+            maxHeight: '60vh',
             overflow: 'auto',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
+            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)',
+            border: '1px solid rgba(0,0,0,0.06)',
+            position: showVariableSelector.anchor ? 'absolute' : 'fixed',
+            left: showVariableSelector.anchor ? `${(showVariableSelector as any).anchor.left}px` : '50%',
+            top: showVariableSelector.anchor ? `${(showVariableSelector as any).anchor.top}px` : '50%',
+            transform: showVariableSelector.anchor ? 'translateY(8px)' : 'translate(-50%, -50%)'
           }}>
+            {/* 头部区域 */}
             <div style={{
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              marginBottom: '16px',
-              borderBottom: '1px solid #e9ecef',
-              paddingBottom: '8px'
+              marginBottom: '24px',
+              paddingBottom: '16px',
+              borderBottom: '2px solid rgba(102, 126, 234, 0.1)'
             }}>
-              <h4 style={{ margin: 0 }}>选择变量</h4>
+              <div>
+                <h4 style={{ 
+                  margin: 0, 
+                  fontSize: '20px', 
+                  fontWeight: '700',
+                  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text'
+                }}>
+                  🎯 选择变量
+                </h4>
+                <p style={{ 
+                  margin: '4px 0 0 0', 
+                  fontSize: '14px', 
+                  color: '#64748b',
+                  fontWeight: '500'
+                }}>
+                  点击下方变量插入到您的 Prompt 中
+                </p>
+              </div>
               <button
                 onClick={() => setShowVariableSelector({ show: false })}
                 style={{
-                  background: 'none',
+                  background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)',
                   border: 'none',
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '12px',
                   fontSize: '18px',
                   cursor: 'pointer',
-                  color: '#666'
+                  color: '#64748b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s ease',
+                  boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)';
+                  e.currentTarget.style.color = '#dc2626';
+                  e.currentTarget.style.transform = 'scale(1.05)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)';
+                  e.currentTarget.style.color = '#64748b';
+                  e.currentTarget.style.transform = 'scale(1)';
                 }}
               >
                 ×
               </button>
             </div>
 
+            {/* 滚动内容区域 */}
+            <div style={{
+              maxHeight: 'calc(80vh - 160px)',
+              overflow: 'auto',
+              paddingRight: '8px'
+            }}>
             {Object.entries(availableVariables).map(([category, variables]) => (
-              <div key={category} style={{ marginBottom: '16px' }}>
+                <div key={category} style={{ marginBottom: '24px' }}>
+                  {/* 分类标题 */}
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    marginBottom: '16px',
+                    padding: '12px 16px',
+                    background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%)',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(102, 126, 234, 0.15)'
+                  }}>
+                    <div style={{
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      marginRight: '12px'
+                    }}></div>
                 <h5 style={{ 
-                  margin: '0 0 8px 0',
-                  color: '#007bff',
-                  fontSize: '14px',
-                  fontWeight: 'bold'
+                      margin: 0, 
+                      fontSize: '16px',
+                      fontWeight: '600',
+                      color: '#1e293b'
                 }}>
                   {category}
                 </h5>
-                <div style={{ marginLeft: '8px' }}>
-                  {variables.map((variable, index) => (
-                    <div
-                      key={index}
-                      onClick={() => {
-                        if (showVariableSelector.position === 'fallback') {
-                          // 插入到备用模板中
-                          const currentTemplate = localData.fallback_template || '';
-                          const newTemplate = currentTemplate + variable.value;
-                          updateNodeData({ fallback_template: newTemplate });
-                        } else if (showVariableSelector.position === 'system_prompt') {
-                          // 插入到系统提示中
-                          const currentPrompt = localData.system_prompt || '';
-                          const newPrompt = currentPrompt + variable.value;
-                          updateNodeData({ system_prompt: newPrompt });
-                        } else if (showVariableSelector.position === 'user_prompt') {
-                          // 插入到用户提示中
-                          const currentPrompt = localData.user_prompt || '';
-                          const newPrompt = currentPrompt + variable.value;
-                          updateNodeData({ user_prompt: newPrompt });
-                        } else {
-                          // 插入到变量列表中
-                          const variables = localData.variables || {};
-                          if (showVariableSelector.position) {
-                            variables[showVariableSelector.position] = variable.value;
-                            updateNodeData({ variables });
-                          }
-                        }
-                        setShowVariableSelector({ show: false });
+                  </div>
+
+                  {/* 自定义实体类型选择器 */}
+                  {category.includes('记录') && customEntityTypes.length > 0 && (
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ 
+                        display: 'block', 
+                        marginBottom: '8px', 
+                        fontSize: '13px', 
+                        color: '#475569',
+                        fontWeight: '600'
+                      }}>
+                        📋 选择实体类型:
+                      </label>
+                      <select
+                        value={selectedCustomEntityTypeId || ''}
+                        onChange={(e) => {
+                          setSelectedCustomEntityTypeId(e.target.value ? Number(e.target.value) : null);
+                          setSelectedCustomEntityRecordId(null);
                       }}
                       style={{
-                        padding: '8px 12px',
-                        borderRadius: '4px',
-                        border: '1px solid #e9ecef',
-                        marginBottom: '4px',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                        backgroundColor: '#f8f9fa'
-                      }}
+                          width: '100%', 
+                          padding: '12px 16px', 
+                          border: '2px solid rgba(102, 126, 234, 0.2)', 
+                          borderRadius: '12px',
+                          fontSize: '14px',
+                          background: 'white',
+                          color: '#1e293b',
+                          outline: 'none',
+                          transition: 'all 0.2s ease'
+                        }}
+                        onFocus={(e) => {
+                          e.currentTarget.style.borderColor = '#667eea';
+                          e.currentTarget.style.boxShadow = '0 0 0 3px rgba(102, 126, 234, 0.1)';
+                        }}
+                        onBlur={(e) => {
+                          e.currentTarget.style.borderColor = 'rgba(102, 126, 234, 0.2)';
+                          e.currentTarget.style.boxShadow = 'none';
+                        }}
+                      >
+                        <option value="">请选择实体类型...</option>
+                        {customEntityTypes.map((et) => (
+                          <option key={et.id} value={et.id}>{et.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* 自定义实体记录选择器 */}
+                  {selectedCustomEntityTypeId && customEntityRecords.length > 0 && category.includes('记录') && (
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ 
+                        display: 'block', 
+                        marginBottom: '8px', 
+                        fontSize: '13px', 
+                        color: '#475569',
+                        fontWeight: '600'
+                      }}>
+                        📝 选择记录:
+                      </label>
+                      <select
+                        value={selectedCustomEntityRecordId || ''}
+                        onChange={(e) => setSelectedCustomEntityRecordId(e.target.value ? Number(e.target.value) : null)}
+                        style={{ 
+                          width: '100%', 
+                          padding: '12px 16px', 
+                          border: '2px solid rgba(102, 126, 234, 0.2)', 
+                          borderRadius: '12px',
+                          fontSize: '14px',
+                          background: 'white',
+                          color: '#1e293b',
+                          outline: 'none',
+                          transition: 'all 0.2s ease'
+                        }}
+                        onFocus={(e) => {
+                          e.currentTarget.style.borderColor = '#667eea';
+                          e.currentTarget.style.boxShadow = '0 0 0 3px rgba(102, 126, 234, 0.1)';
+                        }}
+                        onBlur={(e) => {
+                          e.currentTarget.style.borderColor = 'rgba(102, 126, 234, 0.2)';
+                          e.currentTarget.style.boxShadow = 'none';
+                        }}
+                      >
+                        <option value="">请选择记录...</option>
+                        {customEntityRecords.map((record) => (
+                          <option key={record.id} value={record.id}>
+                            {record.data?.name || `记录 ${record.id}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* 变量按钮网格 */}
+                  <div style={{ 
+                    display: 'grid', 
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', 
+                    gap: '12px' 
+                  }}>
+                    {(variables as any[]).map((variable, varIndex) => {
+                      const variableValue = variable.value;
+                      const isDisabled = variableValue.includes('.recordId.') && !selectedCustomEntityRecordId;
+
+                      return (
+                        <button
+                          key={varIndex}
+                          onClick={() => handleVariableSelect(variable.value)}
+                          disabled={isDisabled}
+                          style={{ 
+                            padding: '16px', 
+                            border: isDisabled ? '2px solid #e2e8f0' : '2px solid rgba(102, 126, 234, 0.15)', 
+                            borderRadius: '12px', 
+                            background: isDisabled 
+                              ? 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)' 
+                              : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)', 
+                            textAlign: 'left', 
+                            cursor: isDisabled ? 'not-allowed' : 'pointer',
+                            opacity: isDisabled ? 0.5 : 1,
+                            transition: 'all 0.2s ease',
+                            position: 'relative',
+                            overflow: 'hidden'
+                          }}
+                          title={variable.description}
                       onMouseEnter={(e) => {
-                        e.currentTarget.style.backgroundColor = '#e9ecef';
-                        e.currentTarget.style.borderColor = '#007bff';
+                            if (!isDisabled) {
+                              e.currentTarget.style.borderColor = '#667eea';
+                              e.currentTarget.style.background = 'linear-gradient(135deg, #f0f4ff 0%, #e0e7ff 100%)';
+                              e.currentTarget.style.transform = 'translateY(-2px)';
+                              e.currentTarget.style.boxShadow = '0 8px 25px rgba(102, 126, 234, 0.15)';
+                            }
                       }}
                       onMouseLeave={(e) => {
-                        e.currentTarget.style.backgroundColor = '#f8f9fa';
-                        e.currentTarget.style.borderColor = '#e9ecef';
-                      }}
-                    >
-                      <div style={{ fontWeight: 'bold', fontSize: '14px' }}>
+                            if (!isDisabled) {
+                              e.currentTarget.style.borderColor = 'rgba(102, 126, 234, 0.15)';
+                              e.currentTarget.style.background = 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)';
+                              e.currentTarget.style.transform = 'translateY(0)';
+                              e.currentTarget.style.boxShadow = 'none';
+                            }
+                          }}
+                        >
+                          {/* 变量标签 */}
+                          <div style={{ 
+                            display: 'flex', 
+                            alignItems: 'center', 
+                            marginBottom: '8px' 
+                          }}>
+                            <div style={{
+                              width: '6px',
+                              height: '6px',
+                              borderRadius: '50%',
+                              background: isDisabled 
+                                ? '#94a3b8' 
+                                : 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                              marginRight: '8px'
+                            }}></div>
+                            <span style={{ 
+                              fontWeight: '600', 
+                              fontSize: '14px',
+                              color: isDisabled ? '#94a3b8' : '#1e293b'
+                            }}>
                         {variable.label}
+                            </span>
                       </div>
+                          
+                          {/* 变量值 */}
                       <div style={{ 
+                            background: isDisabled 
+                              ? 'rgba(148, 163, 184, 0.1)' 
+                              : 'rgba(102, 126, 234, 0.08)',
+                            padding: '6px 10px',
+                            borderRadius: '6px',
+                            marginBottom: '8px',
+                            fontFamily: 'Monaco, Consolas, "Courier New", monospace',
                         fontSize: '12px', 
-                        color: '#28a745',
-                        fontFamily: 'monospace',
-                        margin: '2px 0'
+                            color: isDisabled ? '#94a3b8' : '#4338ca',
+                            fontWeight: '500'
                       }}>
                         {variable.value}
                       </div>
-                      <div style={{ fontSize: '11px', color: '#666' }}>
+                          
+                          {/* 描述 */}
+                          <div style={{ 
+                            fontSize: '12px', 
+                            color: isDisabled ? '#94a3b8' : '#64748b',
+                            lineHeight: '1.4'
+                          }}>
                         {variable.description}
                       </div>
+
+                          {/* 禁用状态提示 */}
+                          {isDisabled && (
+                            <div style={{
+                              position: 'absolute',
+                              top: '8px',
+                              right: '8px',
+                              background: '#fbbf24',
+                              color: '#92400e',
+                              fontSize: '10px',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              fontWeight: '600'
+                            }}>
+                              需选择记录
                     </div>
-                  ))}
+                          )}
+                        </button>
+                      )
+                    })}
                 </div>
               </div>
             ))}
           </div>
+
+            {/* 底部操作区域 */}
+            <div style={{ 
+              display: 'flex', 
+              justifyContent: 'flex-end', 
+              gap: '12px', 
+              marginTop: '24px',
+              paddingTop: '16px',
+              borderTop: '2px solid rgba(102, 126, 234, 0.1)'
+            }}>
+              <button
+                onClick={() => setShowVariableSelector({ show: false })}
+                style={{ 
+                  padding: '12px 24px', 
+                  background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)', 
+                  border: 'none', 
+                  borderRadius: '12px', 
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  color: '#475569',
+                  transition: 'all 0.2s ease',
+                  boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%)';
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                  e.currentTarget.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.15)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)';
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.1)';
+                }}
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+
         </div>
       )}
 
@@ -1771,20 +2315,27 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          backgroundColor: 'rgba(0, 0, 0, 0.0)',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 2000
+          alignItems: 'flex-start',
+          justifyContent: 'flex-start',
+          zIndex: 2300,
+          pointerEvents: 'none'
         }}>
-          <div style={{
+          <div ref={mediaPopoverRef} style={{
+            pointerEvents: 'auto',
             backgroundColor: 'white',
             borderRadius: '8px',
-            padding: '20px',
-            width: '800px',
-            maxHeight: '80vh',
+            padding: '12px',
+            width: '480px',
+            maxHeight: '60vh',
             overflow: 'auto',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
+            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)'
+            ,
+            position: showMediaSelector.anchor ? 'absolute' : 'fixed',
+            left: showMediaSelector.anchor ? `${(showMediaSelector as any).anchor.left}px` : '50%',
+            top: showMediaSelector.anchor ? `${(showMediaSelector as any).anchor.top}px` : '50%',
+            transform: showMediaSelector.anchor ? 'translateY(8px)' : 'translate(-50%, -50%)'
           }}>
             <div style={{
               display: 'flex',
@@ -1827,6 +2378,28 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                       {folderList.map((folder, index) => (
                         <div key={index}>
                           <div
+                            onClick={() => {
+                              if (expandedFolder === folder.name) {
+                                setExpandedFolder(null);
+                                setFolderMediaList([]);
+                              } else {
+                                setExpandedFolder(folder.name);
+                                fetchFolderMedia(folder.name);
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                if (expandedFolder === folder.name) {
+                                  setExpandedFolder(null);
+                                  setFolderMediaList([]);
+                                } else {
+                                  setExpandedFolder(folder.name);
+                                  fetchFolderMedia(folder.name);
+                                }
+                              }
+                            }}
                             style={{
                               padding: '12px',
                               borderRadius: '4px',
@@ -1864,13 +2437,29 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                     let currentPrompt = '';
 
                                     if (showMediaSelector.position === 'system_prompt') {
+                                      if (selectedPromptId) {
+                                        setPromptLibrary(promptLibrary.map((p: any) => 
+                                          p.id === selectedPromptId 
+                                            ? { ...p, system_prompt: (p.system_prompt || '') + tag }
+                                            : p
+                                        ));
+                                      } else {
                                       currentPrompt = localData.system_prompt || '';
                                       updatedPrompt = currentPrompt + tag;
                                       updateNodeData({ system_prompt: updatedPrompt });
+                                      }
                                     } else if (showMediaSelector.position === 'user_prompt') {
+                                      if (selectedPromptId) {
+                                        setPromptLibrary(promptLibrary.map((p: any) => 
+                                          p.id === selectedPromptId 
+                                            ? { ...p, user_prompt: (p.user_prompt || '') + tag }
+                                            : p
+                                        ));
+                                      } else {
                                       currentPrompt = localData.user_prompt || '';
                                       updatedPrompt = currentPrompt + tag;
                                       updateNodeData({ user_prompt: updatedPrompt });
+                                      }
                                     }
 
                                     setShowMediaSelector({ show: false });
@@ -1937,13 +2526,29 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                         let currentPrompt = '';
 
                                         if (showMediaSelector.position === 'system_prompt') {
+                                          if (selectedPromptId) {
+                                            setPromptLibrary(promptLibrary.map((p: any) => 
+                                              p.id === selectedPromptId 
+                                                ? { ...p, system_prompt: (p.system_prompt || '') + tag }
+                                                : p
+                                            ));
+                                          } else {
                                           currentPrompt = localData.system_prompt || '';
                                           updatedPrompt = currentPrompt + tag;
                                           updateNodeData({ system_prompt: updatedPrompt });
+                                          }
                                         } else if (showMediaSelector.position === 'user_prompt') {
+                                          if (selectedPromptId) {
+                                            setPromptLibrary(promptLibrary.map((p: any) => 
+                                              p.id === selectedPromptId 
+                                                ? { ...p, user_prompt: (p.user_prompt || '') + tag }
+                                                : p
+                                            ));
+                                          } else {
                                           currentPrompt = localData.user_prompt || '';
                                           updatedPrompt = currentPrompt + tag;
                                           updateNodeData({ user_prompt: updatedPrompt });
+                                          }
                                         }
 
                                         setShowMediaSelector({ show: false });
@@ -2031,13 +2636,29 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                             let currentPrompt = '';
 
                             if (showMediaSelector.position === 'system_prompt') {
+                              if (selectedPromptId) {
+                                setPromptLibrary(promptLibrary.map((p: any) => 
+                                  p.id === selectedPromptId 
+                                    ? { ...p, system_prompt: (p.system_prompt || '') + tag }
+                                    : p
+                                ));
+                              } else {
                               currentPrompt = localData.system_prompt || '';
                               updatedPrompt = currentPrompt + tag;
                               updateNodeData({ system_prompt: updatedPrompt });
+                              }
                             } else if (showMediaSelector.position === 'user_prompt') {
+                              if (selectedPromptId) {
+                                setPromptLibrary(promptLibrary.map((p: any) => 
+                                  p.id === selectedPromptId 
+                                    ? { ...p, user_prompt: (p.user_prompt || '') + tag }
+                                    : p
+                                ));
+                              } else {
                               currentPrompt = localData.user_prompt || '';
                               updatedPrompt = currentPrompt + tag;
                               updateNodeData({ user_prompt: updatedPrompt });
+                              }
                             }
 
                             setShowMediaSelector({ show: false });
@@ -2112,15 +2733,16 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         </div>
       )}
 
-      {/* Prompt 预览弹窗（合并 System + User） */}
-      {showPromptPreview && (
+      {/* Prompt 预览弹窗 - 详细版本 */}
+      {showPromptPreview && selectedPromptId && (
         <div style={{
           position: 'fixed',
           top: 0,
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.5)',
+          backgroundColor: 'rgba(0, 0, 0, 0.6)',
+          backdropFilter: 'blur(8px)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -2128,543 +2750,641 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         }}>
           <div style={{
             backgroundColor: 'white',
-            borderRadius: '8px',
-            padding: '18px',
-            width: '760px',
-            maxHeight: '80vh',
+            borderRadius: '20px',
+            padding: '32px',
+            width: '900px',
+            maxHeight: '90vh',
             overflow: 'auto',
-            boxShadow: '0 6px 20px rgba(0,0,0,0.2)'
+            boxShadow: '0 25px 50px rgba(0, 0, 0, 0.25)',
+            border: '1px solid rgba(255, 255, 255, 0.2)'
           }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h4 style={{ margin: 0 }}>Prompt 预览</h4>
+            {/* 头部 */}
+            <div style={{ 
+              display: 'flex', 
+              justifyContent: 'space-between', 
+              alignItems: 'center', 
+              marginBottom: '24px',
+              paddingBottom: '16px',
+              borderBottom: '2px solid #f0f0f0'
+            }}>
+              <h2 style={{ 
+                margin: 0, 
+                fontSize: '24px', 
+                fontWeight: '700',
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                backgroundClip: 'text'
+              }}>
+                🔍 Prompt 预览
+              </h2>
+              <button
+                onClick={() => setShowPromptPreview(false)}
+                style={{
+                  background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)',
+                  border: 'none',
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '12px',
+                  fontSize: '18px',
+                  cursor: 'pointer',
+                  color: '#64748b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)';
+                  e.currentTarget.style.color = '#dc2626';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)';
+                  e.currentTarget.style.color = '#64748b';
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            {(() => {
+              const currentPrompt = promptLibrary.find((p: any) => p.id === selectedPromptId);
+              if (!currentPrompt) return null;
+
+              return (
               <div>
-                <button onClick={() => { navigator.clipboard?.writeText(compiledPromptText) }} style={{ marginRight: 8 }}>复制</button>
-                <button onClick={() => setShowPromptPreview(false)}>关闭</button>
+                  {/* Prompt 基本信息 */}
+                  <div style={{ marginBottom: '24px' }}>
+                    <div style={{
+                      background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%)',
+                      padding: '20px',
+                      borderRadius: '16px',
+                      border: '1px solid rgba(102, 126, 234, 0.15)'
+                    }}>
+                      <h3 style={{ 
+                        fontSize: '20px', 
+                        fontWeight: '600', 
+                        color: '#1e293b', 
+                        marginBottom: '8px',
+                        display: 'flex',
+                        alignItems: 'center'
+                      }}>
+                        📝 {currentPrompt.name}
+                      </h3>
+                      {currentPrompt.description && (
+                        <p style={{ 
+                          fontSize: '16px', 
+                          color: '#64748b', 
+                          margin: 0,
+                          lineHeight: '1.5'
+                        }}>
+                          {currentPrompt.description}
+                        </p>
+                      )}
+                      <div style={{ 
+                        fontSize: '12px', 
+                        color: '#94a3b8', 
+                        marginTop: '8px',
+                        fontFamily: 'monospace'
+                      }}>
+                        ID: {currentPrompt.id}
               </div>
             </div>
-            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', background: '#f8f9fa', padding: 12, borderRadius: 8 }}>{compiledPromptText}</pre>
+          </div>
+
+                  {/* System Prompt */}
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ 
+                      fontSize: '18px', 
+                      fontWeight: '600', 
+                      color: '#667eea', 
+                      marginBottom: '12px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}>
+                      🤖 System Prompt
+                    </h3>
+                    <div style={{
+                      background: '#f8fafc',
+                      padding: '20px',
+                      borderRadius: '12px',
+                      border: '2px solid #e2e8f0',
+                      fontFamily: 'Monaco, Consolas, "Courier New", monospace',
+                      fontSize: '14px',
+                      lineHeight: '1.6',
+                      whiteSpace: 'pre-wrap',
+                      maxHeight: '200px',
+                      overflow: 'auto',
+                      color: '#374151'
+                    }}>
+                      {currentPrompt.system_prompt || '(未设置)'}
+        </div>
+                  </div>
+
+                  {/* User Prompt */}
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ 
+                      fontSize: '18px', 
+                      fontWeight: '600', 
+                      color: '#667eea', 
+                      marginBottom: '12px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}>
+                      👤 User Prompt
+                    </h3>
+                    <div style={{
+                      background: '#f8fafc',
+                      padding: '20px',
+                      borderRadius: '12px',
+                      border: '2px solid #e2e8f0',
+                      fontFamily: 'Monaco, Consolas, "Courier New", monospace',
+                      fontSize: '14px',
+                      lineHeight: '1.6',
+                      whiteSpace: 'pre-wrap',
+                      maxHeight: '200px',
+                      overflow: 'auto',
+                      color: '#374151'
+                    }}>
+                      {currentPrompt.user_prompt || '(未设置)'}
+                    </div>
+                  </div>
+
+                  {/* 操作按钮 */}
+                  <div style={{ 
+                    display: 'flex', 
+                    justifyContent: 'flex-end', 
+                    gap: '12px',
+                    paddingTop: '16px',
+                    borderTop: '2px solid #f0f0f0'
+                  }}>
+                    <button
+                      onClick={() => {
+                        const fullPromptText = `=== ${currentPrompt.name} ===\n\n` +
+                          `描述: ${currentPrompt.description || '无'}\n\n` +
+                          `=== System Prompt ===\n${currentPrompt.system_prompt || '(未设置)'}\n\n` +
+                          `=== User Prompt ===\n${currentPrompt.user_prompt || '(未设置)'}`;
+                        navigator.clipboard?.writeText(fullPromptText);
+                        alert('Prompt 内容已复制到剪贴板！');
+                      }}
+                      style={{
+                        padding: '12px 24px',
+                        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                        fontSize: '14px',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-1px)';
+                        e.currentTarget.style.boxShadow = '0 8px 25px rgba(16, 185, 129, 0.25)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }}
+                    >
+                      📋 复制全部
+                    </button>
+                    {/* 新增：在预览中加入 编辑 按钮，打开 Prompt 编辑模态 */}
+                    <button
+                      onClick={() => setShowPromptEditor(true)}
+                      style={{
+                        padding: '12px 24px',
+                        background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                        fontSize: '14px',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      ✏️ 编辑 Prompt
+                    </button>
+                    <button
+                      onClick={() => setShowPromptPreview(false)}
+                      style={{
+                        padding: '12px 24px',
+                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                        fontSize: '14px',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-1px)';
+                        e.currentTarget.style.boxShadow = '0 8px 25px rgba(102, 126, 234, 0.25)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }}
+                    >
+                      关闭预览
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
 
-      <style jsx>{`
-        .node-config-panel {
-          padding: 0;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          border: none;
-          border-radius: 16px;
-          box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15), 0 8px 16px rgba(0, 0, 0, 0.1);
-          width: 100%;
-          height: 100%;
-          overflow: hidden;
-          position: relative;
-          display: flex;
-          flex-direction: column;
-        }
+      {/* 保存通知 */}
+      {showSaveNotification && (
+        <div style={{
+          position: 'fixed',
+          right: 20,
+          bottom: 24,
+          background: 'linear-gradient(90deg, #10b981 0%, #059669 100%)',
+          color: 'white',
+          padding: '12px 16px',
+          borderRadius: 10,
+          boxShadow: '0 8px 24px rgba(2,6,23,0.2)',
+          zIndex: 4000
+        }}>
+          {showSaveNotification}
+        </div>
+      )}
 
-        .node-config-panel::before {
-          content: '';
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          height: 3px;
-          background: linear-gradient(90deg, #667eea, #764ba2, #f093fb, #f5576c);
-          background-size: 300% 100%;
-          animation: shimmer 3s linear infinite;
-        }
+      {/* Prompt 编辑器弹窗 */}
+      {showPromptEditor && selectedPromptId && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 2500 }}>
+          <PromptFormModal
+            prompt={promptLibrary.find((p: any) => p.id === selectedPromptId)}
+            onSave={async (data) => {
+              try {
+                await api.put(`/api/prompt-library/${selectedPromptId}`, data);
+                // 更新本地 promptLibrary 状态
+                setPromptLibrary((prev: any) =>
+                  prev.map((p: any) =>
+                    p.id === selectedPromptId ? { ...p, system_prompt: data.system_prompt, user_prompt: data.user_prompt } : p
+                  )
+                );
+                // 更新 React Flow 节点数据
+                updateNodeData((prevData: any) => ({
+                  ...prevData,
+                  selected_prompt_system_prompt: data.system_prompt,
+                  selected_prompt_user_prompt: data.user_prompt,
+                }));
+                          setShowPromptEditor(false);
+                setShowSaveNotification('Prompt 更新成功');
+                          setTimeout(() => setShowSaveNotification(null), 3000);
+                        } catch (error) {
+                console.error('Error updating prompt:', error);
+                alert('更新 Prompt 失败');
+              }
+            }}
+            onCancel={() => setShowPromptEditor(false)}
+          />
+        </div>
+      )}
 
-        @keyframes shimmer {
-          0% { background-position: 300% 0; }
-          100% { background-position: -300% 0; }
-        }
-        
-        h3 {
-          background: rgba(255, 255, 255, 0.95);
-          backdrop-filter: blur(10px);
-          margin: 0;
-          padding: 20px 24px;
-          color: #2d3748;
-          font-size: 18px;
-          font-weight: 600;
-          border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-          position: sticky;
-          top: 0;
-          z-index: 10;
-        }
-        
-        .config-fields {
-          background: rgba(255, 255, 255, 0.98);
-          backdrop-filter: blur(20px);
-          padding: 24px;
-          flex: 1;
-          overflow-y: auto;
-        }
+      {/* 知识库选择器弹窗 */}
+      {showKnowledgeBaseSelector.show && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.0)',
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'flex-start',
+          zIndex: 2300,
+          pointerEvents: 'none'
+        }}>
+          <div ref={knowledgeBasePopoverRef} style={{
+            pointerEvents: 'auto',
+            background: 'white',
+            borderRadius: '12px',
+            padding: '16px',
+            width: '480px',
+            maxHeight: '60vh',
+            overflow: 'auto',
+            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)',
+            border: '1px solid rgba(0,0,0,0.06)',
+            position: (showKnowledgeBaseSelector as any).anchor ? 'absolute' : 'fixed',
+            left: (showKnowledgeBaseSelector as any).anchor ? `${(showKnowledgeBaseSelector as any).anchor.left}px` : '50%',
+            top: (showKnowledgeBaseSelector as any).anchor ? `${(showKnowledgeBaseSelector as any).anchor.top}px` : '50%',
+            transform: (showKnowledgeBaseSelector as any).anchor ? 'translateY(8px)' : 'translate(-50%, -50%)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>选择知识库</h4>
+              <button onClick={() => setShowKnowledgeBaseSelector({ show: false })} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer' }}>×</button>
+            </div>
 
-        .prompt-actions {
-          display: flex;
-          gap: 10px;
-          margin-top: 10px;
-          justify-content: flex-end;
-          align-items: center;
-        }
+            <div>
+              {knowledgeBases.length > 0 ? knowledgeBases.map((kb: any) => (
+                <div key={kb.id} onClick={() => {
+                  const kbTag = `{{kb.${kb.id}}}`;
+                  const field = showKnowledgeBaseSelector.position as keyof typeof localData;
+                  if (field === 'system_prompt') {
+                    if (selectedPromptId) {
+                      setPromptLibrary(promptLibrary.map((p: any) => p.id === selectedPromptId ? { ...p, system_prompt: (p.system_prompt || '') + kbTag } : p));
+                    } else {
+                      const cur = localData.system_prompt || '';
+                      updateNodeData({ system_prompt: cur + kbTag });
+                    }
+                  } else if (field === 'user_prompt') {
+                    if (selectedPromptId) {
+                      setPromptLibrary(promptLibrary.map((p: any) => p.id === selectedPromptId ? { ...p, user_prompt: (p.user_prompt || '') + kbTag } : p));
+                    } else {
+                      const cur = localData.user_prompt || '';
+                      updateNodeData({ user_prompt: cur + kbTag });
+                    }
+                  } else if (field === 'fallback') {
+                    const cur = localData.fallback_template || '';
+                    updateNodeData({ fallback_template: cur + kbTag });
+                  }
+                  setShowKnowledgeBaseSelector({ show: false });
+                }} style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #e9ecef', marginBottom: 8, cursor: 'pointer', background: 'white' }}>
+                  <div style={{ fontWeight: 600 }}>{kb.name}</div>
+                  {kb.description && <div style={{ fontSize: 12, color: '#666' }}>{kb.description}</div>}
+                  <div style={{ fontFamily: 'monospace', fontSize: 11, color: '#94a3b8', marginTop: 6 }}>{`{{kb.${kb.id}}}`}</div>
+                </div>
+              )) : (
+                <div style={{ color: '#666', padding: 12 }}>暂无知识库</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
-        .small-action-button {
-          padding: 8px 12px !important;
-          font-size: 13px !important;
-          border-radius: 10px !important;
-          border: 1px solid rgba(11,37,69,0.06) !important;
-          cursor: pointer !important;
-          background: linear-gradient(180deg, #ffffff, #f7fbff) !important;
-          color: #0b2545 !important;
-          box-shadow: 0 6px 18px rgba(11,37,69,0.06) !important;
-          transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease !important;
-        }
+      {/* Prompt 预览弹窗 - 详细版本 */}
+      {showPromptPreview && selectedPromptId && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.6)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 2100
+        }}>
+          <div style={{
+            backgroundColor: 'white',
+            borderRadius: '20px',
+            padding: '32px',
+            width: '900px',
+            maxHeight: '90vh',
+            overflow: 'auto',
+            boxShadow: '0 25px 50px rgba(0, 0, 0, 0.25)',
+            border: '1px solid rgba(255, 255, 255, 0.2)'
+          }}>
+            {/* 头部 */}
+            <div style={{ 
+              display: 'flex', 
+              justifyContent: 'space-between', 
+              alignItems: 'center', 
+              marginBottom: '24px',
+              paddingBottom: '16px',
+              borderBottom: '2px solid #f0f0f0'
+            }}>
+              <h2 style={{ 
+                margin: 0, 
+                fontSize: '24px', 
+                fontWeight: '700',
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                WebkitBackgroundClip: 'text',
+                WebkitTextFillColor: 'transparent',
+                backgroundClip: 'text'
+              }}>
+                🔍 Prompt 预览
+              </h2>
+              <button
+                onClick={() => setShowPromptPreview(false)}
+                style={{
+                  background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)',
+                  border: 'none',
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: '12px',
+                  fontSize: '18px',
+                  cursor: 'pointer',
+                  color: '#64748b',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)';
+                  e.currentTarget.style.color = '#dc2626';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)';
+                  e.currentTarget.style.color = '#64748b';
+                }}
+              >
+                ×
+              </button>
+            </div>
 
-        .small-action-button.primary {
-          background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%) !important;
-          color: #ffffff !important;
-          border: none !important;
-          box-shadow: 0 10px 28px rgba(79,70,229,0.14) !important;
-        }
+            {(() => {
+              const currentPrompt = promptLibrary.find((p: any) => p.id === selectedPromptId);
+              if (!currentPrompt) return null;
 
-        .small-action-button:hover {
-          transform: translateY(-3px) !important;
-          box-shadow: 0 16px 36px rgba(11,37,69,0.12) !important;
-        }
+              return (
+              <div>
+                  {/* Prompt 基本信息 */}
+                  <div style={{ marginBottom: '24px' }}>
+                    <div style={{
+                      background: 'linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%)',
+                      padding: '20px',
+                      borderRadius: '16px',
+                      border: '1px solid rgba(102, 126, 234, 0.15)'
+                    }}>
+                      <h3 style={{ 
+                        fontSize: '20px', 
+                        fontWeight: '600', 
+                        color: '#1e293b', 
+                        marginBottom: '8px',
+                        display: 'flex',
+                        alignItems: 'center'
+                      }}>
+                        📝 {currentPrompt.name}
+                      </h3>
+                      {currentPrompt.description && (
+                        <p style={{ 
+                          fontSize: '16px', 
+                          color: '#64748b', 
+                          margin: 0,
+                          lineHeight: '1.5'
+                        }}>
+                          {currentPrompt.description}
+                        </p>
+                      )}
+                      <div style={{ 
+                        fontSize: '12px', 
+                        color: '#94a3b8', 
+                        marginTop: '8px',
+                        fontFamily: 'monospace'
+                      }}>
+                        ID: {currentPrompt.id}
+              </div>
+            </div>
+          </div>
 
-        .config-field textarea,
-        .config-field input[type="text"],
-        .config-field select {
-          border: 1px solid rgba(11,37,69,0.06) !important;
-          background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(250,252,255,0.95)) !important;
-          box-shadow: 0 6px 18px rgba(11,37,69,0.03) inset !important;
-          padding: 12px 14px !important;
-          border-radius: 12px !important;
-        }
+                  {/* System Prompt */}
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ 
+                      fontSize: '18px', 
+                      fontWeight: '600', 
+                      color: '#667eea', 
+                      marginBottom: '12px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}>
+                      🤖 System Prompt
+                    </h3>
+                    <div style={{
+                      background: '#f8fafc',
+                      padding: '20px',
+                      borderRadius: '12px',
+                      border: '2px solid #e2e8f0',
+                      fontFamily: 'Monaco, Consolas, "Courier New", monospace',
+                      fontSize: '14px',
+                      lineHeight: '1.6',
+                      whiteSpace: 'pre-wrap',
+                      maxHeight: '200px',
+                      overflow: 'auto',
+                      color: '#374151'
+                    }}>
+                      {currentPrompt.system_prompt || '(未设置)'}
+        </div>
+                  </div>
 
-        /* iPhone-like switch */
-        .switch {
-          position: relative;
-          display: inline-block;
-          width: 44px;
-          height: 24px;
-        }
+                  {/* User Prompt */}
+                  <div style={{ marginBottom: '24px' }}>
+                    <h3 style={{ 
+                      fontSize: '18px', 
+                      fontWeight: '600', 
+                      color: '#667eea', 
+                      marginBottom: '12px',
+                      display: 'flex',
+                      alignItems: 'center'
+                    }}>
+                      👤 User Prompt
+                    </h3>
+                    <div style={{
+                      background: '#f8fafc',
+                      padding: '20px',
+                      borderRadius: '12px',
+                      border: '2px solid #e2e8f0',
+                      fontFamily: 'Monaco, Consolas, "Courier New", monospace',
+                      fontSize: '14px',
+                      lineHeight: '1.6',
+                      whiteSpace: 'pre-wrap',
+                      maxHeight: '200px',
+                      overflow: 'auto',
+                      color: '#374151'
+                    }}>
+                      {currentPrompt.user_prompt || '(未设置)'}
+                    </div>
+                  </div>
 
-        .switch input { 
-          opacity: 0;
-          width: 0;
-          height: 0;
-        }
+                  {/* 操作按钮 */}
+                  <div style={{ 
+                    display: 'flex', 
+                    justifyContent: 'flex-end', 
+                    gap: '12px',
+                    paddingTop: '16px',
+                    borderTop: '2px solid #f0f0f0'
+                  }}>
+                    <button
+                      onClick={() => {
+                        const fullPromptText = `=== ${currentPrompt.name} ===\n\n` +
+                          `描述: ${currentPrompt.description || '无'}\n\n` +
+                          `=== System Prompt ===\n${currentPrompt.system_prompt || '(未设置)'}\n\n` +
+                          `=== User Prompt ===\n${currentPrompt.user_prompt || '(未设置)'}`;
+                        navigator.clipboard?.writeText(fullPromptText);
+                        alert('Prompt 内容已复制到剪贴板！');
+                      }}
+                      style={{
+                        padding: '12px 24px',
+                        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                        fontSize: '14px',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-1px)';
+                        e.currentTarget.style.boxShadow = '0 8px 25px rgba(16, 185, 129, 0.25)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }}
+                    >
+                      📋 复制全部
+                    </button>
+                    {/* 新增：在预览中加入 编辑 按钮，打开 Prompt 编辑模态 */}
+                    <button
+                      onClick={() => setShowPromptEditor(true)}
+                      style={{
+                        padding: '12px 24px',
+                        background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                        fontSize: '14px',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      ✏️ 编辑 Prompt
+                    </button>
+                    <button
+                      onClick={() => setShowPromptPreview(false)}
+                      style={{
+                        padding: '12px 24px',
+                        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600',
+                        fontSize: '14px',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-1px)';
+                        e.currentTarget.style.boxShadow = '0 8px 25px rgba(102, 126, 234, 0.25)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }}
+                    >
+                      关闭预览
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
 
-        .slider {
-          position: absolute;
-          cursor: pointer;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background-color: #cfd8e3;
-          transition: .2s;
-          border-radius: 999px;
-          box-shadow: inset 0 1px 2px rgba(11,37,69,0.06);
-        }
-
-        .slider:before {
-          position: absolute;
-          content: "";
-          height: 18px;
-          width: 18px;
-          left: 3px;
-          bottom: 3px;
-          background-color: white;
-          transition: .2s;
-          border-radius: 50%;
-          box-shadow: 0 4px 10px rgba(11,37,69,0.08);
-        }
-
-        .switch input:checked + .slider {
-          background-color: #34d399; /* green */
-        }
-
-        .switch input:checked + .slider:before {
-          transform: translateX(20px);
-        }
-
-        .config-fields::-webkit-scrollbar {
-          width: 6px;
-        }
-
-        .config-fields::-webkit-scrollbar-track {
-          background: rgba(0, 0, 0, 0.05);
-          border-radius: 3px;
-        }
-
-        .config-fields::-webkit-scrollbar-thumb {
-          background: linear-gradient(135deg, #667eea, #764ba2);
-          border-radius: 3px;
-        }
-        
-        .config-field {
-          margin-bottom: 20px;
-          animation: fadeInUp 0.3s ease-out;
-        }
-
-        @keyframes fadeInUp {
-          from {
-            opacity: 0;
-            transform: translateY(10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-        
-        label {
-          display: block;
-          margin-bottom: 8px;
-          font-weight: 600;
-          color: #2d3748;
-          font-size: 14px;
-          position: relative;
-        }
-
-        label::after {
-          content: '';
-          position: absolute;
-          bottom: -2px;
-          left: 0;
-          width: 30px;
-          height: 2px;
-          background: linear-gradient(90deg, #667eea, #764ba2);
-          border-radius: 1px;
-        }
-        
-        input[type="text"],
-        input[type="number"],
-        input[type="time"],
-        select,
-        textarea {
-          width: 100%;
-          padding: 12px 16px;
-          border: 2px solid transparent;
-          border-radius: 12px;
-          font-size: 14px;
-          background: rgba(255, 255, 255, 0.8);
-          backdrop-filter: blur(10px);
-          transition: all 0.3s ease;
-          box-sizing: border-box;
-        }
-
-        input[type="text"]:focus,
-        input[type="number"]:focus,
-        input[type="time"]:focus,
-        select:focus,
-        textarea:focus {
-          outline: none;
-          border-color: #667eea;
-          background: rgba(255, 255, 255, 0.95);
-          box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
-          transform: translateY(-1px);
-        }
-
-        textarea {
-          resize: vertical;
-          min-height: 80px;
-          font-family: inherit;
-        }
-
-        input::placeholder,
-        textarea::placeholder {
-          color: #a0aec0;
-        }
-
-        /* 确保输入框可以正常选择和删除文本 */
-        input[type="text"],
-        input[type="number"], 
-        input[type="time"],
-        textarea {
-          user-select: text !important;
-          -webkit-user-select: text !important;
-          -moz-user-select: text !important;
-          -ms-user-select: text !important;
-          cursor: text !important;
-          -webkit-touch-callout: text !important;
-          -webkit-user-modify: read-write !important;
-        }
-
-        /* 确保复选框正常工作 */
-        input[type="checkbox"] {
-          width: auto !important;
-          height: auto !important;
-          padding: 0 !important;
-          margin: 0 4px 0 0 !important;
-          cursor: pointer;
-        }
-        
-        .checkbox-group {
-          display: flex;
-          gap: 15px;
-          flex-wrap: wrap;
-        }
-        
-        .checkbox-group label {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          background: rgba(102, 126, 234, 0.05);
-          padding: 8px 12px;
-          border-radius: 8px;
-          transition: all 0.2s ease;
-          cursor: pointer;
-        }
-
-        .checkbox-group label:hover {
-          background: rgba(102, 126, 234, 0.1);
-        }
-
-        .checkbox-group label::after {
-          display: none;
-        }
-
-        .checkbox-group input[type="checkbox"] {
-          width: auto;
-          margin: 0;
-        }
-        
-        .config-actions {
-          background: rgba(255, 255, 255, 0.95);
-          backdrop-filter: blur(10px);
-          padding: 20px 24px;
-          border-top: 1px solid rgba(0, 0, 0, 0.05);
-          display: flex;
-          justify-content: flex-end;
-          gap: 12px;
-          position: sticky;
-          bottom: 0;
-        }
-        
-        button {
-          padding: 12px 24px;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white;
-          border: none;
-          border-radius: 12px;
-          cursor: pointer;
-          font-weight: 600;
-          font-size: 14px;
-          transition: all 0.3s ease;
-          box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-        }
-        
-        button:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 8px 24px rgba(102, 126, 234, 0.4);
-        }
-
-        button:active {
-          transform: translateY(0);
-        }
-
-        /* 变量管理美化样式 */
-        .variable-item {
-          background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
-          border: 2px solid rgba(102, 126, 234, 0.1);
-          border-radius: 12px;
-          padding: 16px;
-          margin-bottom: 12px;
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          transition: all 0.3s ease;
-        }
-
-        .variable-item:hover {
-          border-color: rgba(102, 126, 234, 0.3);
-          background: linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%);
-          transform: translateY(-1px);
-        }
-
-        .variable-number {
-          min-width: 32px !important;
-          height: 32px;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white;
-          border-radius: 8px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 12px;
-          font-weight: 600;
-          box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-          padding: 0 !important;
-        }
-
-        .variable-input {
-          flex: 1 !important;
-          border: 1px solid rgba(102, 126, 234, 0.2) !important;
-          background: rgba(255, 255, 255, 0.9) !important;
-          border-radius: 6px !important;
-          outline: none !important;
-          font-size: 14px !important;
-          color: #2d3748 !important;
-          padding: 8px 12px !important;
-          user-select: text !important;
-          -webkit-user-select: text !important;
-          -moz-user-select: text !important;
-          -ms-user-select: text !important;
-          cursor: text !important;
-          -webkit-touch-callout: text !important;
-          -webkit-user-modify: read-write !important;
-          transition: all 0.2s ease !important;
-        }
-
-        .variable-input:focus {
-          box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
-          transform: none !important;
-          background: rgba(255, 255, 255, 1) !important;
-          border-color: rgba(102, 126, 234, 0.5) !important;
-        }
-
-        .variable-input:hover {
-          border-color: rgba(102, 126, 234, 0.3) !important;
-        }
-
-        .variable-button {
-          padding: 6px 12px !important;
-          border: none !important;
-          border-radius: 8px !important;
-          cursor: pointer !important;
-          font-size: 12px !important;
-          font-weight: 600 !important;
-          transition: all 0.2s ease !important;
-          box-shadow: none !important;
-        }
-
-        .variable-button.select {
-          background: linear-gradient(135deg, #48bb78 0%, #38a169 100%) !important;
-          color: white !important;
-          box-shadow: 0 2px 8px rgba(72, 187, 120, 0.3) !important;
-        }
-
-        .variable-button.select:hover {
-          transform: translateY(-1px) !important;
-          box-shadow: 0 4px 12px rgba(72, 187, 120, 0.4) !important;
-        }
-
-        .variable-button.delete {
-          background: linear-gradient(135deg, #f56565 0%, #e53e3e 100%) !important;
-          color: white !important;
-          box-shadow: 0 2px 8px rgba(245, 101, 101, 0.3) !important;
-        }
-
-        .variable-button.delete:hover {
-          transform: translateY(-1px) !important;
-          box-shadow: 0 4px 12px rgba(245, 101, 101, 0.4) !important;
-        }
-
-        .add-variable-button {
-          width: 100% !important;
-          padding: 16px !important;
-          background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%) !important;
-          color: #667eea !important;
-          border: 2px dashed rgba(102, 126, 234, 0.3) !important;
-          border-radius: 12px !important;
-          cursor: pointer !important;
-          font-size: 14px !important;
-          font-weight: 600 !important;
-          transition: all 0.3s ease !important;
-          box-shadow: none !important;
-        }
-
-        .add-variable-button:hover {
-          background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%) !important;
-          border-color: rgba(102, 126, 234, 0.5) !important;
-          transform: translateY(-1px) !important;
-          box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2) !important;
-        }
-        /* 条件构建器样式 */
-        .conditions-list {
-          background: rgba(248, 250, 252, 0.8);
-          border-radius: 12px;
-          padding: 16px;
-          margin-top: 12px;
-        }
-
-        .condition-item {
-          background: white;
-          border: 2px solid rgba(102, 126, 234, 0.1);
-          border-radius: 12px;
-          padding: 16px;
-          margin-bottom: 12px;
-          position: relative;
-          transition: all 0.3s ease;
-        }
-
-        .condition-item:hover {
-          border-color: rgba(102, 126, 234, 0.3);
-          box-shadow: 0 4px 12px rgba(102, 126, 234, 0.1);
-        }
-
-        .condition-item:last-child {
-          margin-bottom: 0;
-        }
-
-        .logic-operator {
-          position: absolute;
-          top: -12px;
-          left: 50%;
-          transform: translateX(-50%);
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white;
-          padding: 4px 12px;
-          border-radius: 12px;
-          font-size: 11px;
-          font-weight: 600;
-          box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
-        }
-
-        .condition-controls {
-          display: grid;
-          grid-template-columns: 2fr 1fr 2fr auto;
-          gap: 12px;
-          align-items: end;
-        }
-
-        .condition-field, .condition-operator, .condition-value {
-          display: flex;
-          flex-direction: column;
-        }
-
-        .condition-field label, .condition-operator label, .condition-value label {
-          font-size: 12px;
-          margin-bottom: 4px;
-          color: #4a5568;
-          font-weight: 500;
-        }
-
-        .condition-field label::after, .condition-operator label::after, .condition-value label::after {
-          display: none;
-        }
-
-        .condition-actions {
-          display: flex;
-          align-items: flex-end;
-        }
-
-        @media (max-width: 768px) {
-          .condition-controls {
-            grid-template-columns: 1fr;
-            gap: 8px;
-          }
-          
-          .condition-actions {
-            justify-content: center;
-            margin-top: 8px;
-          }
-        }
-      `}</style>
     </div>
   )
 }

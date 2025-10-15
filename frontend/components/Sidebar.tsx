@@ -73,6 +73,16 @@ export default function Sidebar({ currentPage = '' }: SidebarProps) {
     {
       icon: (
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2C8.13 2 5 5.13 5 9C5 11.08 6.16 12.87 7.76 14.18C8.94 15.13 10.33 15.91 12 16.5C13.67 15.91 15.06 15.13 16.24 14.18C17.84 12.87 19 11.08 19 9C19 5.13 15.87 2 12 2ZM12 18C10.75 18 9.57 17.65 8.5 17.06L7 19L12 22L17 19L15.5 17.06C14.43 17.65 13.25 18 12 18Z" fill="currentColor"/>
+        </svg>
+      ),
+      label: language === 'zh' ? 'AI 提示词库' : 'AI Prompt Library',
+      href: '/ai-prompt-library',
+      id: 'ai-prompt-library'
+    },
+    {
+      icon: (
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M19 3H5C3.9 3 3 3.9 3 5V19C3 20.1 3.9 21 5 21H19C20.1 21 21 20.1 21 19V5C21 3.9 20.1 3 19 3ZM19 19H5V5H19V19Z" fill="currentColor"/>
           <path d="M7 10L12 7L17 10V17H7V10Z" fill="currentColor"/>
         </svg>

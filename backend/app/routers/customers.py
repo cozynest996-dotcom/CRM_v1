@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 import json
+import uuid
 
 from app.db.database import SessionLocal
 from app.db import models
@@ -9,7 +10,7 @@ from app.schemas.customer import CustomerBase, CustomerOut
 from app.middleware.auth import get_current_user, get_optional_user
 from app.services.settings import SettingsService
 
-router = APIRouter(prefix="/customers", tags=["customers"])
+router = APIRouter(prefix="/api/customers", tags=["customers"])
 
 def get_db():
     db = SessionLocal()
@@ -33,7 +34,7 @@ def create_customer(customer: CustomerBase, db: Session = Depends(get_db)):
     return db_customer
 
 # 获取客户列表（支持分页、字段选择、搜索与简单过滤）
-@router.get("/")
+@router.get("") # Changed from "/customers" to "" to correctly match /api/customers
 def list_customers(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=500),
@@ -326,7 +327,7 @@ def update_customer_photo(data: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/{customer_id}")
-def get_customer(customer_id: str, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+def get_customer(customer_id: uuid.UUID, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
     """返回完整客户信息"""
     customer = db.query(models.Customer).filter(models.Customer.id == customer_id, models.Customer.user_id == current_user.id).first()
     if not customer:
@@ -395,3 +396,87 @@ def get_customer(customer_id: str, db: Session = Depends(get_db), current_user: 
         if g not in result:
             result[g] = get_field_value(g)
     return result
+
+@router.get('/fields/detailed')
+def get_customer_fields_detailed(db: Session = Depends(get_db), current_user: models.User = Depends(get_optional_user)):
+    """返回客户表字段的详细信息，包括字段类型和描述，用于变量选择器"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        result = {
+            'basic_fields': [],
+            'custom_fields': []
+        }
+        
+        # 基础字段映射
+        field_descriptions = {
+            'name': {'label': '客户姓名', 'description': '客户的完整姓名'},
+            'phone': {'label': '客户电话', 'description': '客户的联系电话'},
+            'email': {'label': '客户邮箱', 'description': '客户的邮箱地址'},
+            'status': {'label': '客户状态', 'description': '客户的当前状态'},
+            'photo_url': {'label': '头像URL', 'description': '客户头像图片链接'},
+            'last_message': {'label': '最后消息', 'description': '客户最后发送的消息'},
+            'last_timestamp': {'label': '最后消息时间', 'description': '客户最后消息的时间戳'},
+            'unread_count': {'label': '未读消息数', 'description': '未读消息的数量'},
+            'stage_id': {'label': '销售阶段ID', 'description': '客户所在的销售阶段ID'},
+        }
+        
+        # 获取基础字段
+        base_columns = [c.name for c in models.Customer.__table__.columns]
+        for col_name in base_columns:
+            if col_name not in ['id', 'version', 'user_id', 'updated_at', 'custom_fields']:
+                field_info = field_descriptions.get(col_name, {
+                    'label': col_name.replace('_', ' ').title(),
+                    'description': f'客户的{col_name}字段'
+                })
+                
+                result['basic_fields'].append({
+                    'name': col_name,
+                    'label': field_info['label'],
+                    'value': f"{{{{customer.{col_name}}}}}",
+                    'description': field_info['description'],
+                    'type': 'text'  # 简化类型处理
+                })
+        
+        # 如果用户已认证，获取自定义字段
+        if current_user:
+            try:
+                sample_rows = db.query(models.Customer.custom_fields).filter(
+                    models.Customer.user_id == current_user.id,
+                    models.Customer.custom_fields.isnot(None)
+                ).limit(200).all()
+                
+                custom_keys = set()
+                for row in sample_rows:
+                    cf = row[0]
+                    if not cf:
+                        continue
+                    try:
+                        if isinstance(cf, str):
+                            obj = json.loads(cf)
+                        else:
+                            obj = cf
+                        if isinstance(obj, dict):
+                            custom_keys.update(k for k in obj.keys() if isinstance(k, str))
+                    except Exception:
+                        continue
+                
+                for key in sorted(custom_keys):
+                    result['custom_fields'].append({
+                        'name': key,
+                        'label': key.replace('_', ' ').title(),
+                        'value': f"{{{{customer.custom.{key}}}}}",
+                        'description': f'客户自定义字段: {key}',
+                        'type': 'custom'
+                    })
+                    
+                logger.info(f"Found {len(result['custom_fields'])} custom fields for user {current_user.id}")
+            except Exception as e:
+                logger.warning(f"Error fetching custom fields for user {current_user.id}: {e}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting detailed customer fields: {e}")
+        return {'basic_fields': [], 'custom_fields': []}

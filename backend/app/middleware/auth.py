@@ -13,16 +13,31 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
     db: Session = Depends(get_db)
 ) -> User:
     """获取当前登录用户"""
+    if credentials is None:
+        logger.debug("get_current_user: Authorization header missing.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
     auth_service = AuthService(db)
     
     try:
         # 记录是否提供了 Authorization header（不记录 token 原文）
         has_auth = bool(credentials and getattr(credentials, 'credentials', None))
         logger.debug(f"get_current_user called; Authorization header present: {has_auth}")
+
+        # 新增：确保 credentials.credentials 是字符串类型
+        if not isinstance(credentials.credentials, str):
+            logger.debug(f"Invalid credentials type: {type(credentials.credentials)}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token format"
+            )
 
         # 验证JWT令牌
         payload = auth_service.verify_token(credentials.credentials)

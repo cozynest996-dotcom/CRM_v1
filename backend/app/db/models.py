@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy import func
 from app.core.config import settings
 from app.db.database import Base
+from sqlalchemy.orm import remote
 
 # 根据数据库类型选择 UUID 列类型
 def get_uuid_column():
@@ -303,3 +304,94 @@ class MediaFile(Base):
 
     # 关系
     user = relationship("User", backref="media_files")
+
+# 新增：AI 提示词库模型
+class AIPrompt(Base):
+    __tablename__ = "ai_prompts"
+
+    id = Column(get_uuid_column(), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    system_prompt = Column(Text, nullable=True)
+    user_prompt = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    user = relationship("User", backref="ai_prompts")
+
+# 新增：知识库模型
+class KnowledgeBase(Base):
+    __tablename__ = "knowledge_bases"
+
+    id = Column(get_uuid_column(), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    category = Column(String, nullable=True)  # 'product', 'sales', 'support', 'policy', etc.
+    content = Column(Text, nullable=False)
+    tags = Column(JSON, default=lambda: [])  # 标签数组
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    user = relationship("User", backref="knowledge_bases")
+
+# 新增：自定义实体类型 (CustomEntityType)
+class CustomEntityType(Base):
+    __tablename__ = "custom_entity_types"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False) # 例如: "房源", "公寓单元", "任务"
+    description = Column(Text, nullable=True)
+    icon = Column(String, nullable=True) # 例如: "🏠", "🏢", "✅"
+    is_active = Column(Boolean, default=True, nullable=False) # 新增：是否激活
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    user = relationship("User", backref="custom_entity_types")
+    fields = relationship("CustomField", back_populates="entity_type", cascade="all, delete-orphan", foreign_keys="CustomField.entity_type_id")
+    records = relationship("CustomEntityRecord", back_populates="entity_type", cascade="all, delete-orphan")
+
+# 新增：自定义字段 (CustomField)
+class CustomField(Base):
+    __tablename__ = "custom_fields"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entity_type_id = Column(Integer, ForeignKey("custom_entity_types.id"), nullable=False, index=True)
+    name = Column(String, nullable=False) # 显示名称, 例如: "产品名称"
+    field_key = Column(String, nullable=False) # 唯一键, 例如: "product_name"
+    field_type = Column(String, nullable=False) # "text", "number", "date", "select", "reference" 等
+    is_required = Column(Boolean, default=False)
+    default_value = Column(Text, nullable=True) # 新增：欄位的預設值
+    is_searchable = Column(Boolean, default=False, nullable=False) # 新增：是否可搜索
+    options = Column(JSON, nullable=True) # 对于 "select" 类型
+    reference_entity_type_id = Column(Integer, ForeignKey("custom_entity_types.id"), nullable=True) # 对于 "reference" 类型
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    entity_type = relationship("CustomEntityType", back_populates="fields", foreign_keys=[entity_type_id])
+    # 如果是引用字段，可以通过此关系获取被引用的实体类型
+    referenced_entity_type = relationship("CustomEntityType", foreign_keys=[reference_entity_type_id], remote_side=lambda: CustomEntityType.id, post_update=True)
+
+    __table_args__ = (UniqueConstraint('entity_type_id', 'field_key', name='_entity_type_field_key_uc'),)
+
+# 新增：自定义实体记录 (CustomEntityRecord)
+class CustomEntityRecord(Base):
+    __tablename__ = "custom_entity_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entity_type_id = Column(Integer, ForeignKey("custom_entity_types.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    data = Column(JSON, default=lambda: {}) # 存储实际的字段数据, 例如: {"product_name": "iPhone", "price": 999}
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # 关系
+    entity_type = relationship("CustomEntityType", back_populates="records")
+    user = relationship("User", backref="custom_entity_records")

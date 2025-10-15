@@ -5,35 +5,6 @@ interface ColumnMapping {
   [sheetColumn: string]: string // { "Sheet Column Name": "dbFieldName" }
 }
 
-const mockSheetColumns = ['ID', '问题', '答案', '标签', '分类']
-const mockDbFields = {
-  faq: [
-    { label: 'ID', value: 'id' },
-    { label: '问题', value: 'question' },
-    { label: '答案', value: 'answer' },
-    { label: '标签 (逗号分隔)', value: 'tags' },
-    { label: '分类名称', value: 'category_name' },
-  ],
-  products: [
-    { label: 'ID', value: 'id' },
-    { label: '名称', value: 'name' },
-    { label: '描述', value: 'description' },
-    { label: '价格', value: 'price' },
-    { label: '图片 URL', value: 'image_url' },
-    { label: '分类名称', value: 'category_name' },
-  ],
-  articles: [
-    { label: 'ID', value: 'id' },
-    { label: '标题', value: 'title' },
-    { label: '摘要', value: 'summary' },
-    { label: '内容', value: 'content' },
-    { label: '作者', value: 'author' },
-    { label: '发布日期', value: 'publish_date' },
-    { label: '标签 (逗号分隔)', value: 'tags' },
-    { label: '分类名称', value: 'category_name' },
-  ],
-}
-
 type IntegrationTab = 'googleSheets' | 'aiJsonImport'
 
 export default function KnowledgeBaseIntegrationsPage() {
@@ -45,7 +16,7 @@ export default function KnowledgeBaseIntegrationsPage() {
   const [sheetUrl, setSheetUrl] = useState('')
   const [selectedTab, setSelectedTab] = useState('')
   const [availableTabs, setAvailableTabs] = useState<string[]>([])
-  const [selectedKnowledgeType, setSelectedKnowledgeType] = useState<'faq' | 'products' | 'articles' | 'custom' | ''>('faq')
+  const [selectedKnowledgeType, setSelectedKnowledgeType] = useState<'faq' | 'product_service' | 'article' | 'custom' | ''>('faq')
   const [columnMapping, setColumnMapping] = useState<ColumnMapping>({})
   const [selectedCustomEntityId, setSelectedCustomEntityId] = useState<string | null>(null)
   const [isSyncEnabled, setIsSyncEnabled] = useState(false)
@@ -53,8 +24,9 @@ export default function KnowledgeBaseIntegrationsPage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const [googleUserEmail, setGoogleUserEmail] = useState<string | null>(null) // New state for Google user email
-  const [sheetColumns, setSheetColumns] = useState<string[]>(mockSheetColumns) // New state for sheet columns
+  const [sheetColumns, setSheetColumns] = useState<string[]>([]) // New state for sheet columns
   const [customEntityTypes, setCustomEntityTypes] = useState<any[]>([])
+  const [knowledgeBaseFields, setKnowledgeBaseFields] = useState<{ label: string; value: string }[]>([])
 
   // AI JSON Import states
   const [nonStructuredText, setNonStructuredText] = useState('')
@@ -62,6 +34,7 @@ export default function KnowledgeBaseIntegrationsPage() {
   const [importTargetType, setImportTargetType] = useState<'faq' | 'products' | 'articles' | ''>('faq')
   const [jsonLoading, setJsonLoading] = useState(false)
   const [jsonMessage, setJsonMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  // const [authToken, setAuthToken] = useState<string | null>(null) // New state for auth token
 
   const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'
 
@@ -412,14 +385,17 @@ export default function KnowledgeBaseIntegrationsPage() {
       if (!entity || !entity.fields) return []
       return entity.fields.map((f: any) => ({ label: `${f.name} (${f.fieldKey})`, value: f.fieldKey }))
     }
-    if (!mockDbFields[selectedKnowledgeType as keyof typeof mockDbFields]) return []
-    return mockDbFields[selectedKnowledgeType as keyof typeof mockDbFields]
+    // Fallback for KnowledgeBase types (faq, product_service, article)
+    return [
+      ...knowledgeBaseFields
+    ]
   }
 
   // Fetch custom entity types for mapping options
   useEffect(() => {
     const fetchCustomEntityTypes = async () => {
       const jwtToken = localStorage.getItem('token')
+      if (!jwtToken) return // Don't fetch if not authenticated
       try {
         const res = await fetch(`${API_BASE_URL}/api/custom-objects/custom-entity-types/`, {
           headers: {
@@ -433,8 +409,27 @@ export default function KnowledgeBaseIntegrationsPage() {
         console.warn('Failed to load custom entity types', e)
       }
     }
+
+    const fetchKnowledgeBaseFields = async () => {
+      const jwtToken = localStorage.getItem('token')
+      if (!jwtToken) return // Don't fetch if not authenticated
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/knowledge-bases/fields`, {
+          headers: {
+            'Authorization': `Bearer ${jwtToken}`,
+          },
+        })
+        if (!res.ok) throw new Error('Failed to fetch knowledge base fields')
+        const data = await res.json()
+        setKnowledgeBaseFields(data)
+      } catch (e) {
+        console.error('Error fetching knowledge base fields:', e)
+      }
+    }
+
     fetchCustomEntityTypes()
-  }, [])
+    fetchKnowledgeBaseFields()
+  }, []) // Empty dependency array means this runs once on mount
 
   // AI JSON Import Handlers
   const handleGenerateJson = async () => {
@@ -443,19 +438,9 @@ export default function KnowledgeBaseIntegrationsPage() {
     setGeneratedJson('')
     // Simulate API call to backend AI for JSON generation
     await new Promise(resolve => setTimeout(resolve, 2500))
-    const exampleJson = [
-      {
-        question: language === 'zh' ? '什么是 CRM 自动化？' : 'What is CRM Automation?',
-        answer: language === 'zh' ? 'CRM 自动化是一种通过软件工具自动执行销售、营销和客户服务任务的策略。' : 'CRM automation is a strategy that uses software tools to automate sales, marketing, and customer service tasks.',
-        tags: [language === 'zh' ? 'CRM' : 'CRM', language === 'zh' ? '自动化' : 'Automation'],
-      },
-      {
-        question: language === 'zh' ? '如何有效管理客户？' : 'How to manage customers effectively?',
-        answer: language === 'zh' ? '有效管理客户需要定期沟通、个性化服务和利用数据分析。' : 'Effective customer management requires regular communication, personalized services, and leveraging data analytics.',
-        tags: [language === 'zh' ? '客户管理' : 'Customer Management', language === 'zh' ? '策略' : 'Strategy'],
-      },
-    ]
-    setGeneratedJson(JSON.stringify(exampleJson, null, 2))
+    // Instead of hardcoded JSON, ideally call a backend AI service to generate it.
+    // For now, we'll just clear it.
+    // setGeneratedJson(JSON.stringify(exampleJson, null, 2))
     setJsonMessage({ type: 'success', text: language === 'zh' ? 'AI 已成功生成结构化 JSON！' : 'AI successfully generated structured JSON!' })
     setJsonLoading(false)
   }
@@ -501,7 +486,7 @@ export default function KnowledgeBaseIntegrationsPage() {
     // Fetch Google Sheets settings when component mounts or language changes
     const fetchGoogleSheetsSettings = async () => {
       const jwtToken = localStorage.getItem('token')
-      if (!jwtToken) {
+      if (!jwtToken) { // Use authToken state
         console.warn("No JWT token found, can't fetch Google Sheets settings.")
         setIsGoogleConnected(false)
         return
@@ -705,8 +690,8 @@ export default function KnowledgeBaseIntegrationsPage() {
                 >
                   <option value="">{language === 'zh' ? '请选择' : 'Select...'}</option>
                   <option value="faq">{language === 'zh' ? '常见问题 (FAQ)' : 'FAQs'}</option>
-                  <option value="products">{language === 'zh' ? '产品与服务' : 'Products & Services'}</option>
-                  <option value="articles">{language === 'zh' ? '文章与文档' : 'Articles & Documents'}</option>
+                  <option value="product_service">{language === 'zh' ? '产品与服务' : 'Products & Services'}</option>
+                  <option value="article">{language === 'zh' ? '文章与文档' : 'Articles & Documents'}</option>
                   <option value="custom">{language === 'zh' ? '自定义对象' : 'Custom Object'}</option>
                 </select>
                 {selectedKnowledgeType === 'custom' && (
@@ -872,7 +857,7 @@ export default function KnowledgeBaseIntegrationsPage() {
         </h4>
         <select
           value={importTargetType}
-          onChange={(e) => setImportTargetType(e.target.value as 'faq' | 'products' | 'articles')}
+          onChange={(e) => setImportTargetType(e.target.value as 'faq' | 'product_service' | 'article')}
           style={{
             width: '100%',
             padding: '10px 15px',
@@ -884,8 +869,8 @@ export default function KnowledgeBaseIntegrationsPage() {
           }}
         >
           <option value="faq">{language === 'zh' ? '常见问题 (FAQ)' : 'FAQs'}</option>
-          <option value="products">{language === 'zh' ? '产品与服务' : 'Products & Services'}</option>
-          <option value="articles">{language === 'zh' ? '文章与文档' : 'Articles & Documents'}</option>
+          <option value="product_service">{language === 'zh' ? '产品与服务' : 'Products & Services'}</option>
+          <option value="article">{language === 'zh' ? '文章与文档' : 'Articles & Documents'}</option>
         </select>
       </div>
 

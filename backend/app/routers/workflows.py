@@ -30,7 +30,7 @@ from app.db.models import Workflow, WorkflowExecution, WorkflowNodeTemplate
 from app.middleware.auth import get_current_user
 from app.services.workflow_engine import WorkflowEngine
 
-router = APIRouter()
+router = APIRouter(tags=["workflows"])
 
 # 工作流数据模型
 class WorkflowEdge(BaseModel):
@@ -332,7 +332,7 @@ async def execute_workflow(
         raise HTTPException(status_code=500, detail=f"工作流执行失败: {str(e)}")
 
 # 触发工作流（通过消息）
-@router.post("/workflows/trigger/message")
+@router.post("/trigger/message", tags=["workflows"])
 async def trigger_workflow_by_message(
     trigger_data: dict,
     background_tasks: BackgroundTasks,

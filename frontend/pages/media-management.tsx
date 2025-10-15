@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Head from 'next/head';
-import { Layout, Menu, Breadcrumb, Button, Upload, message, Card, Image, Row, Col, Typography, Input, Space, Popconfirm, Modal, Select, Segmented, List, Avatar } from 'antd';
+import { Layout, Menu, Breadcrumb, Button, Upload, message, Card, Image, Row, Col, Typography, Input, Space, Popconfirm, Modal, Select, Segmented, List, Avatar, Spin } from 'antd';
 import { UploadOutlined, FolderOutlined, DeleteOutlined, ExclamationCircleOutlined, EditOutlined, FilePdfOutlined, FileWordOutlined, FileExcelOutlined, FileTextOutlined, PlayCircleOutlined, FileOutlined, AppstoreOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import { Media, uploadMedia, getMediaList, deleteMedia, createFolder, deleteFolder, renameFolder, renameMedia } from '../services/media';
 import { useAuth } from '../hooks/useAuth';
@@ -112,8 +112,14 @@ const MediaManagement: React.FC = () => {
 
     useEffect(() => {
         if (user) {
+            setLoading(true); // 在开始获取数据之前立即设置为加载状态
             fetchMedia(currentFolder);
             setUploadTargetFolder(currentFolder); // 同步上传目标文件夹
+        } else {
+            // 如果用户未认证，确保加载状态被清除或显示未认证信息
+            setLoading(false);
+            setMediaList([]);
+            setFolders([]);
         }
     }, [user, currentFolder]);
 
@@ -629,7 +635,9 @@ const MediaManagement: React.FC = () => {
                                 </Upload.Dragger>
                             </div>
                             {loading ? (
-                                <p>加载中...</p>
+                                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '200px' }}>
+                                    <Spin size="large" tip="加载媒体文件中..." />
+                                </div>
                             ) : (
                                 renderMediaItems(mediaList, folders)
                             )}

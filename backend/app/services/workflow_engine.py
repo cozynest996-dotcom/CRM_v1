@@ -26,13 +26,15 @@ from typing import Dict, Any, List, Optional, Union
 from sqlalchemy.orm import Session
 from app.db.models import (
     Workflow, WorkflowExecution, WorkflowStepExecution, 
-    Customer, Message, AIAnalysis, AuditLog
+    Customer, Message, AIAnalysis, AuditLog, CustomEntityRecord # 导入 CustomEntityRecord
 )
 from app.services.ai_service import AIService
 from app.services.whatsapp import WhatsAppService
 import pytz
 import re
 from app.services.telegram import TelegramService
+import uuid
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -1240,7 +1242,7 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     print(f"    - Resolved from actor: {var_path} -> {value}")
                     return str(value)
 
-            # 3. 尝试 'db.customer' 相关变量
+            # 3. 尝试 'db.customer' 相关变量或 'customer.all'
             if var_path.startswith("db.customer."):
                 customer_obj = self.context.db.get("customer")
                 if customer_obj:
@@ -1248,8 +1250,60 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     if value is not None:
                         print(f"    - Resolved from db.customer: {var_path} -> {value}")
                         return str(value)
+            elif var_path == "customer.all":
+                customer_obj = self.context.db.get("customer")
+                if customer_obj:
+                    # 将整个客户对象（包括 custom_fields）转换为 JSON 字符串
+                    customer_data = customer_obj.__dict__.copy()
+                    customer_data.pop('_s-instance_state', None)
+                    
+                    # 如果 custom_fields 是字符串，尝试解析为字典
+                    if isinstance(customer_data.get('custom_fields'), str):
+                        try:
+                            customer_data['custom_fields'] = json.loads(customer_data['custom_fields'])
+                        except json.JSONDecodeError:
+                            pass # 保持原样，如果不是有效 JSON
 
-            # 4. 尝试 'ai.reply' 相关变量
+                    return json.dumps(customer_data, ensure_ascii=False, indent=2)
+                return "{}"
+
+            # 4. 尝试 'custom_object' 相关变量
+            custom_object_match_field = re.match(r"custom_object\.(\d+)\.(\d+)\.([a-zA-Z0-9_.]+)", var_path)
+            custom_object_match_all = re.match(r"custom_object\.(\d+)\.all", var_path)
+
+            if custom_object_match_field:
+                entity_type_id = int(custom_object_match_field.group(1))
+                record_id = int(custom_object_match_field.group(2))
+                field_key = custom_object_match_field.group(3)
+                
+                record_obj = self.db.query(CustomEntityRecord).filter(
+                    CustomEntityRecord.entity_type_id == entity_type_id,
+                    CustomEntityRecord.id == record_id
+                ).first()
+
+                if record_obj and record_obj.data and field_key in record_obj.data:
+                    value = get_nested_value(record_obj.data, field_key.split('.'))
+                    if value is not None:
+                        print(f"    - Resolved from custom_object field: {var_path} -> {value}")
+                        return str(value)
+            elif custom_object_match_all:
+                entity_type_id = int(custom_object_match_all.group(1))
+                # 从上下文中获取选中的记录ID，如果存在的话
+                selected_record_id = self.context.get(f"selectedCustomEntityRecordId_{entity_type_id}")
+                
+                if selected_record_id:
+                    record_obj = self.db.query(CustomEntityRecord).filter(
+                        CustomEntityRecord.entity_type_id == entity_type_id,
+                        CustomEntityRecord.id == selected_record_id
+                    ).first()
+                    if record_obj:
+                        record_data = record_obj.data.copy() if record_obj.data else {}
+                        print(f"    - Resolved from custom_object all: {var_path} -> {record_data}")
+                        return json.dumps(record_data, ensure_ascii=False, indent=2)
+                print(f"    - Failed to resolve custom_object.all for entity type {entity_type_id}. Record not found or not selected.")
+                return "{}"
+
+            # 5. 尝试 'ai.reply' 相关变量
             if var_path.startswith("ai.reply."):
                 ai_reply = self.context.ai.get("reply", {})
                 value = get_nested_value(ai_reply, var_path.split('.')[2:])
@@ -1257,13 +1311,13 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     print(f"    - Resolved from ai.reply: {var_path} -> {value}")
                     return str(value)
 
-            # 5. 尝试通用变量 (self.context.variables)
+            # 6. 尝试通用变量 (self.context.variables)
             if var_path in self.context.variables:
                 value = self.context.variables[var_path]
                 print(f"    - Resolved from context.variables: {var_path} -> {value}")
                 return str(value)
             
-            # 6. 尝试解析特定节点输出变量，例如 AI_NODE_ID.output.reply_text
+            # 7. 尝试解析特定节点输出变量，例如 AI_NODE_ID.output.reply_text
             parts = var_path.split('.')
             if len(parts) >= 2:
                 node_id = parts[0]

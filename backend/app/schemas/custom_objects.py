@@ -2,6 +2,8 @@ from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from pydantic import model_validator
+import json
 
 class CamelCaseModel(BaseModel):
     model_config = ConfigDict(
@@ -46,6 +48,7 @@ class CustomEntityTypeBase(CamelCaseModel):
     name: str
     description: Optional[str] = None
     icon: Optional[str] = None
+    is_active: bool = True
 
 class CustomEntityTypeCreate(CustomEntityTypeBase):
     fields: List[CustomFieldCreate] = []
@@ -54,6 +57,7 @@ class CustomEntityTypeUpdate(CustomEntityTypeBase):
     name: Optional[str] = None
     description: Optional[str] = None
     icon: Optional[str] = None
+    is_active: Optional[bool] = None
     fields: Optional[List[CustomFieldUpdate]] = None
 
 class CustomEntityTypeOut(CustomEntityTypeBase):
@@ -86,3 +90,31 @@ class CustomEntityRecordOut(CustomEntityRecordBase):
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode='before')
+    @classmethod
+    def parse_data_field(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if 'data' in data and isinstance(data['data'], str):
+                try:
+                    data['data'] = json.loads(data['data'])
+                except json.JSONDecodeError:
+                    data['data'] = {}
+            # Handle cases where `data` might be directly a JSON string from SQLAlchemy
+            elif 'data' not in data and isinstance(data, str):
+                 try:
+                    data = {"data": json.loads(data)}
+                 except json.JSONDecodeError:
+                    data = {"data": {}}
+        elif isinstance(data, str):
+            try:
+                # Handle cases where the whole input is a JSON string of the record itself
+                parsed_data = json.loads(data)
+                if isinstance(parsed_data, dict):
+                    data = parsed_data
+                else:
+                    data = {"data": parsed_data}
+            except json.JSONDecodeError:
+                data = {"data": {}}
+
+        return data

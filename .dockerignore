@@ -1,4 +1,4 @@
-# Ignore node_modules and local dev artifacts
+# Node and local artifacts
 node_modules
 **/node_modules
 npm-debug.log
@@ -7,22 +7,22 @@ yarn-error.log
 .DS_Store
 
 # Ignore user session data and generated browser profiles
-user_sessions
 whatsapp_gateway/user_sessions
+whatsapp_gateway/user_sessions/**
 
 # Ignore git and editor folders
 .git
 .history
 .vscode
 
-# Ignore OS and temp files
-*.log
-tmp
-temp
-.idea
-
 # Exclude large DB or backup files
 *.sql
 crm_db_backup.sql
 crm_db_data.sql
 crm_db_schema.sql
+
+# OS and temp files
+*.log
+tmp
+temp
+.idea

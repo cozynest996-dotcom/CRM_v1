@@ -83,9 +83,27 @@ export const nodeConfigs = {
       target: [{ id: 'in', position: Position.Left }]
     }
   },
+  SendMessage: {
+    label: '发送消息',
+    icon: '📤',
+    color: '#48bb78',
+    handles: {
+      source: [],
+      target: [{ id: 'in', position: Position.Left }]
+    }
+  },
   SendWhatsAppMessage: {
     label: '发送消息',
     icon: '💬',
+    color: '#48bb78',
+    handles: {
+      source: [],
+      target: [{ id: 'in', position: Position.Left }]
+    }
+  },
+  SendMessage: {
+    label: '发送消息',
+    icon: '📤',
     color: '#48bb78',
     handles: {
       source: [],
@@ -108,6 +126,18 @@ export const nodeConfigs = {
     color: '#f59e0b',
     handles: {
       source: [{ id: 'out', position: Position.Right }],
+      target: [{ id: 'in', position: Position.Left }]
+    }
+  },
+  CustomAPI: {
+    label: '自定义API',
+    icon: '🔗',
+    color: '#8b5cf6',
+    handles: {
+      source: [
+        { id: 'success', position: Position.Right, label: '成功' },
+        { id: 'error', position: Position.Bottom, label: '失败' }
+      ],
       target: [{ id: 'in', position: Position.Left }]
     }
   }

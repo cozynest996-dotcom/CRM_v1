@@ -30,8 +30,17 @@ class WhatsAppService:
             if not user:
                 raise ValueError(f"User {user_id} not found")
             
+            logger.info(f"Found user for JWT token generation: {user.email} (ID: {user.id})")
+            
             auth_service = AuthService(db)
             jwt_token = auth_service.create_access_token(user)
+            
+            logger.info(f"Generated JWT token length: {len(jwt_token) if jwt_token else 0}")
+            if jwt_token:
+                logger.info(f"JWT token preview: {jwt_token[:50]}...")
+            else:
+                logger.error("JWT token is None or empty!")
+                
         finally:
             db.close()
             
@@ -46,9 +55,15 @@ class WhatsAppService:
             payload["media_type"] = media_type
         
         headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {jwt_token}"
+            "Content-Type": "application/json"
         }
+        
+        # 添加 Authorization 头（如果有 JWT token）
+        if jwt_token:
+            headers["Authorization"] = f"Bearer {jwt_token}"
+            logger.info(f"Added Authorization header with Bearer token")
+        else:
+            logger.error("No JWT token available, Authorization header not added!")
         
         url = f"{self.gateway_url}/send"
         media_info = f" with media ({media_type}: {media_url})" if media_url else ""
@@ -57,7 +72,13 @@ class WhatsAppService:
         # 添加详细的请求日志
         logger.info(f"Request URL: {url}")
         logger.info(f"Request payload: {json.dumps(payload, indent=2)}")
-        logger.info(f"Request headers: {json.dumps({k: v for k, v in headers.items() if k != 'Authorization'}, indent=2)}")
+        # 显示完整的 headers（包括 Authorization）用于调试
+        headers_for_log = headers.copy()
+        if 'Authorization' in headers_for_log:
+            # 只显示 Authorization 头的前缀，保护完整 token
+            auth_header = headers_for_log['Authorization']
+            headers_for_log['Authorization'] = f"{auth_header[:20]}..." if len(auth_header) > 20 else auth_header
+        logger.info(f"Request headers: {json.dumps(headers_for_log, indent=2)}")
         
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)

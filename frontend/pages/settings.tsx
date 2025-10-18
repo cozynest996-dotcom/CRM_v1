@@ -925,44 +925,69 @@ export default function SettingsPage() {
           ✳️ Telegram 登录设置
         </h2>
         {telegramStatus && telegramStatus.connected ? (
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{ width: 48, height: 48, borderRadius: 24, background: '#edf2f7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <span style={{ fontSize: 20 }}>📱</span>
-              </div>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '16px',
+            backgroundColor: '#f0fff4',
+            borderRadius: '8px',
+            border: '1px solid #68d391'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+              <span style={{ color: '#2e7d2e', fontSize: 20, marginRight: 12 }}>✅</span>
               <div>
-                <div style={{ fontWeight: 600 }}>{telegramStatus.user?.first_name || telegramStatus.user?.username || '已登录'}</div>
-                <div style={{ color: '#718096', fontSize: 13 }}>ID: {telegramStatus.user?.id}</div>
+                <div style={{ fontWeight: 600, color: '#2e7d2e' }}>{telegramStatus.user?.first_name || telegramStatus.user?.username || 'Telegram 已连接'}</div>
+                <div style={{ fontSize: '14px', color: '#4a5568', marginTop: 4 }}>ID: {telegramStatus.user?.id} — 已保存会话，可在服务重启后恢复</div>
               </div>
             </div>
-            <div style={{ marginTop: 12 }}>
+            <div>
               <button
                 onClick={async () => {
                   if (!token) return
                   try {
+                    setIsLoading(true)
                     const resp = await fetch(`${API_BASE}/settings/telegram/logout`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                       body: JSON.stringify({})
                     })
                     if (resp.ok) {
-                      mutateTelegramStatus()
-                      mutateSettings()
+                      // ensure SWR revalidation and UI update
+                      try { await mutateTelegramStatus() } catch (e) { console.warn('mutateTelegramStatus failed', e) }
+                      try { await mutateSettings() } catch (e) { console.warn('mutateSettings failed', e) }
+                      setMessage('Telegram 已断开连接')
+                      setTimeout(() => setMessage(''), 3000)
                     } else {
                       console.error('Telegram logout failed', resp.status)
+                      setMessage('Telegram 登出失败')
+                      setTimeout(() => setMessage(''), 3000)
                     }
                   } catch (e) {
                     console.error('Telegram logout error', e)
+                    setMessage('登出时发生错误')
+                    setTimeout(() => setMessage(''), 3000)
+                  } finally {
+                    setIsLoading(false)
                   }
                 }}
-                style={{ padding: '8px 12px', background: '#e53e3e', color: 'white', border: 'none', borderRadius: 6 }}
+                disabled={isLoading}
+                style={{
+                  padding: '8px 12px',
+                  backgroundColor: '#e53e3e',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: 6,
+                  cursor: isLoading ? 'not-allowed' : 'pointer',
+                  opacity: isLoading ? 0.6 : 1
+                }}
               >
-                Telegram 登出
+                {isLoading ? '处理中...' : 'Telegram 登出'}
               </button>
             </div>
           </div>
         ) : (
-          <TelegramSettings token={token} onUpdate={() => { mutateSettings(); mutateTelegramStatus(); }} />
+          <TelegramSettings key={String(telegramStatus?.connected)} token={token} onUpdate={() => { mutateSettings(); mutateTelegramStatus(); }} />
         )}
       </div>
 

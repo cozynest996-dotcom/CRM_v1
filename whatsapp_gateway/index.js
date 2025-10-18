@@ -121,14 +121,20 @@ function initClientForUser(userId) {
   const attemptDelayMs = 2000;
 
   const createClientState = () => {
-    const puppeteerExecutable = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
+    // For Docker/Linux environment
+    let executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser';
+
+    console.log(`ℹ️ User ${userId}: Current platform: ${process.platform}`);
+    console.log(`ℹ️ User ${userId}: PUPPETEER_EXECUTABLE_PATH env: ${process.env.PUPPETEER_EXECUTABLE_PATH}`);
+    console.log(`ℹ️ User ${userId}: Using Puppeteer executablePath: ${executablePath}`);
+
     const client = new Client({
       authStrategy: new LocalAuth({
         clientId: `user_${userId}`,
         dataPath: getUserAuthPath(userId)
       }),
       puppeteer: {
-        executablePath: (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : puppeteerExecutable),
+        executablePath: executablePath,
         headless: true,
         args: [
           '--no-sandbox',
@@ -384,38 +390,12 @@ function initClientForUser(userId) {
       try {
         const authPath = getUserAuthPath(userId);
         if (fs.existsSync(authPath)) {
-          const removeLocks = (dir) => {
-            try {
-              const entries = fs.readdirSync(dir, { withFileTypes: true });
-              for (const entry of entries) {
-                const full = path.join(dir, entry.name);
-                if (entry.isDirectory()) {
-                  try {
-                    removeLocks(full);
-                  } catch (e) {
-                    // Skip directories we can't access
-                    console.warn(`⚠️ Skipping directory ${full}: ${e.message}`);
-                  }
-                } else {
-                  const name = entry.name;
-                  if (name.startsWith('Singleton') || name === 'lock' || name === 'LOCK' || name === 'SingletonLock') {
-                    try { 
-                      fs.rmSync(full, { force: true }); 
-                      console.log(`🧹 Removed stale lock file ${full}`); 
-                    } catch (e) { 
-                      console.warn(`⚠️ Could not remove lock file ${full}: ${e.message}`);
-                    }
-                  }
-                }
-              }
-            } catch (e) {
-              console.warn(`⚠️ Could not scan directory ${dir}: ${e.message}`);
-            }
-          };
-          removeLocks(authPath);
+          // 在每次尝试初始化之前，强制删除整个用户会话目录，确保每次都从干净状态开始
+          fs.rmSync(authPath, { recursive: true, force: true });
+          console.log(`🗑️ Removed auth directory for user ${userId} before attempt ${attempt} to ensure clean state`);
         }
       } catch (e) {
-        console.warn('⚠️ Failed to pre-clean Chromium lock files:', e && e.message ? e.message : e);
+        console.warn('⚠️ Failed to pre-clean Chromium lock files/auth directory:', e && e.message ? e.message : e);
       }
 
       const state = createClientState();

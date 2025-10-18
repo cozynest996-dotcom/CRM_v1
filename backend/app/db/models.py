@@ -8,6 +8,7 @@ from sqlalchemy import func
 from app.core.config import settings
 from app.db.database import Base
 from sqlalchemy.orm import remote
+from sqlalchemy.ext.mutable import MutableDict, MutableList # 导入 MutableDict
 
 # 根据数据库类型选择 UUID 列类型
 def get_uuid_column():
@@ -133,10 +134,11 @@ class Customer(Base):
     phone = Column(Text, nullable=True)
     email = Column(Text, nullable=True)
     status = Column(Text, nullable=True)  # 租户自定义状态
-    custom_fields = Column(JSON, default=lambda: {})  # 统一存扩展数据
+    custom_fields = Column(MutableDict.as_mutable(JSON), default=lambda: {})  # 统一存扩展数据
     photo_url = Column(String, nullable=True)
     last_message = Column(String, nullable=True)
     last_timestamp = Column(DateTime(timezone=True), nullable=True)
+    telegram_chat_id = Column(Text, nullable=True) # 新增：用于存储Telegram用户的chat_id
     unread_count = Column(Integer, default=0)
     stage_id = Column(Integer, ForeignKey("customer_stages.id"), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -34,6 +34,7 @@ export default function CustomerList() {
   const fetchConfig = async () => {
     try {
       const res = await api.get('/settings/customer-list-config')
+      
       if (res && res.config && Array.isArray(res.config.columns)) {
         setColumns(res.config.columns)
       }
@@ -52,8 +53,8 @@ export default function CustomerList() {
   }
 
   const buildFieldsParam = () => {
-    // Always include id so rows can be keyed and edited even if id column is hidden
-    const keys = ['id', ...columns.filter(c => c.visible).map(c => c.key)]
+    // Always include id and custom_fields so rows can be keyed and edited even if columns are hidden
+    const keys = ['id', 'custom_fields', ...columns.filter(c => c.visible).map(c => c.key)]
     // dedupe
     return Array.from(new Set(keys)).join(',')
   }
@@ -67,8 +68,11 @@ export default function CustomerList() {
       if (lastBefore) filters.last_contact_before = lastBefore
 
       const fields = buildFieldsParam()
+      
       const url = `/api/customers?page=${p}&limit=${limit}&search=${encodeURIComponent(search)}` + (fields ? `&fields=${encodeURIComponent(fields)}` : '') + (Object.keys(filters).length ? `&filters=${encodeURIComponent(JSON.stringify(filters))}` : '')
+      
       const res = await api.get(url)
+      
       if (res && res.rows) {
         setRows(res.rows)
         setTotal(res.total || 0)
@@ -82,10 +86,20 @@ export default function CustomerList() {
   }
 
   useEffect(() => {
-    fetchConfig()
-    fetchStages()
-    fetchRows(1)
+    const initializeData = async () => {
+      await fetchConfig()
+      await fetchStages()
+      await fetchRows(1)
+    }
+    initializeData()
   }, [])
+
+  // 当列配置变化时重新加载数据，确保包含所有需要的字段
+  useEffect(() => {
+    if (columns.length > 0) {
+      fetchRows(page)
+    }
+  }, [columns])
 
   const handleSearch = async () => {
     await fetchRows(1)
@@ -213,66 +227,283 @@ export default function CustomerList() {
   }
 
   return (
-    <div style={{ padding: 12 }}>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索姓名/电话/邮箱" style={{ flex: 1, padding: 8 }} />
-        <select value={stageFilter || ''} onChange={(e) => setStageFilter(e.target.value || null)} style={{ padding: 8, borderRadius: 6 }}>
-          <option value="">全部阶段</option>
-          {stages.map(s => <option key={s.id} value={s.id}>{s.name} ({s.customer_count})</option>)}
-        </select>
-        <input type="date" value={lastAfter || ''} onChange={e => setLastAfter(e.target.value || null)} style={{ padding: 8 }} />
-        <input type="date" value={lastBefore || ''} onChange={e => setLastBefore(e.target.value || null)} style={{ padding: 8 }} />
-        <button onClick={handleSearch} className="toolbar-button">搜索</button>
-        <button onClick={openConfig} className="toolbar-button">⚙️ 列设置</button>
-      </div>
+    <>
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .customer-search-input {
+          padding: 10px 12px;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          font-size: 14px;
+          transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        }
+        .customer-search-input:focus {
+          outline: none;
+          border-color: #3b82f6;
+          box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        .customer-select {
+          padding: 10px 12px;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          font-size: 14px;
+          background-color: white;
+          cursor: pointer;
+          transition: border-color 0.15s ease;
+        }
+        .customer-select:focus {
+          outline: none;
+          border-color: #3b82f6;
+          box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        .customer-button {
+          padding: 10px 16px;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          font-size: 14px;
+          font-weight: 500;
+          background-color: white;
+          color: #374151;
+          cursor: pointer;
+          transition: all 0.15s ease;
+        }
+        .customer-button:hover {
+          background-color: #f9fafb;
+          border-color: #9ca3af;
+        }
+        .customer-button.primary {
+          background-color: #3b82f6;
+          color: white;
+          border-color: #3b82f6;
+        }
+        .customer-button.primary:hover {
+          background-color: #2563eb;
+          border-color: #2563eb;
+        }
+      `}</style>
+      <div style={{ padding: 16 }}>
+        <div style={{ 
+          display: 'flex', 
+          gap: 12, 
+          marginBottom: 16,
+          padding: '16px',
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          border: '1px solid #e5e7eb',
+          boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)'
+        }}>
+          <input 
+            value={search} 
+            onChange={(e) => setSearch(e.target.value)} 
+            placeholder="搜索姓名/电话/邮箱" 
+            className="customer-search-input"
+            style={{ flex: 1 }} 
+          />
+          <select 
+            value={stageFilter || ''} 
+            onChange={(e) => setStageFilter(e.target.value || null)} 
+            className="customer-select"
+            style={{ minWidth: '140px' }}
+          >
+            <option value="">全部阶段</option>
+            {stages.map(s => <option key={s.id} value={s.id}>{s.name} ({s.customer_count})</option>)}
+          </select>
+          <input 
+            type="date" 
+            value={lastAfter || ''} 
+            onChange={e => setLastAfter(e.target.value || null)} 
+            className="customer-search-input"
+            style={{ minWidth: '140px' }}
+          />
+          <input 
+            type="date" 
+            value={lastBefore || ''} 
+            onChange={e => setLastBefore(e.target.value || null)} 
+            className="customer-search-input"
+            style={{ minWidth: '140px' }}
+          />
+          <button onClick={handleSearch} className="customer-button primary">搜索</button>
+          <button onClick={openConfig} className="customer-button">⚙️ 列设置</button>
+        </div>
 
       {loading ? (
-        <div>加载中...</div>
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'center', 
+          alignItems: 'center', 
+          height: '200px',
+          color: '#6b7280',
+          fontSize: '14px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ 
+              width: '16px', 
+              height: '16px', 
+              border: '2px solid #e5e7eb', 
+              borderTop: '2px solid #3b82f6',
+              borderRadius: '50%',
+              animation: 'spin 1s linear infinite'
+            }}></div>
+            加载中...
+          </div>
+        </div>
       ) : (
-        <div style={{ overflow: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <div style={{ 
+          overflow: 'auto', 
+          border: '1px solid #e5e7eb',
+          borderRadius: '8px',
+          backgroundColor: 'white',
+          boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06)'
+        }}>
+          <table style={{ 
+            width: '100%', 
+            borderCollapse: 'collapse',
+            minWidth: `${Math.max(800, columns.filter(c => c.visible).length * 120 + 100)}px` // 动态最小宽度
+          }}>
             <thead>
-              <tr>
+              <tr style={{ backgroundColor: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
                 {columns.filter(c => c.visible).map(c => (
-                  <th key={c.key} style={{ textAlign: 'left', padding: 8 }}>{c.label}</th>
+                  <th key={c.key} style={{ 
+                    textAlign: 'left', 
+                    padding: '12px 16px',
+                    fontWeight: '600',
+                    fontSize: '12px',
+                    color: '#374151',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    whiteSpace: 'nowrap',
+                    minWidth: c.key === 'name' ? '150px' : c.key === 'phone' ? '120px' : c.key === 'email' ? '180px' : '100px'
+                  }}>
+                    {c.label}
+                  </th>
                 ))}
-                <th style={{ textAlign: 'left', padding: 8 }}>操作</th>
+                <th style={{ 
+                  textAlign: 'left', 
+                  padding: '12px 16px',
+                  fontWeight: '600',
+                  fontSize: '12px',
+                  color: '#374151',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                  whiteSpace: 'nowrap',
+                  minWidth: '80px'
+                }}>
+                  操作
+                </th>
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => (
-                <tr key={r.id} style={{ borderTop: '1px solid #eee' }}>
+              {rows.map((r, index) => (
+                <tr key={r.id} style={{ 
+                  borderBottom: '1px solid #f3f4f6',
+                  backgroundColor: index % 2 === 0 ? 'white' : '#fafafa',
+                  transition: 'background-color 0.15s ease'
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#f0f9ff'}
+                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = index % 2 === 0 ? 'white' : '#fafafa'}
+                >
                   {columns.filter(c => c.visible).map(c => (
-                    <td key={c.key} style={{ padding: 8 }}>{
-                      (() => {
-                        // stage_id should display stage name instead of numeric id
+                    <td key={c.key} style={{ 
+                      padding: '12px 16px',
+                      fontSize: '14px',
+                      color: '#374151',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      maxWidth: '200px'
+                    }}>
+                      <div style={{ 
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap'
+                      }} title={(() => {
+                        // 为tooltip显示完整内容
                         if (c.key === 'stage_id') {
                           const sid = r[c.key]
                           if (!sid) return ''
                           const s = stages.find((st: any) => String(st.id) === String(sid))
                           return s ? s.name : String(sid)
                         }
-
-                        const val = c.key === 'tags' ? (r.custom_fields?.tags || '') : (r[c.key] ?? '')
-                        if (!val && val !== 0) return ''
-                        // format timestamps
-                        if (c.key && (c.key.toLowerCase().includes('timestamp') || c.key === 'updated_at')) {
-                          try {
-                            // show time if same day, otherwise show full date
-                            const d = new Date(val)
-                            const today = new Date()
-                            if (d.toDateString() === today.toDateString()) return formatMessageTime(val)
-                            return formatFullDateTime(val)
-                          } catch (e) {
-                            return String(val)
-                          }
-                        }
+                        const val = c.key === 'tags' ? (r.custom_fields?.tags || '') : 
+                                   c.key.startsWith('custom_fields.') ? (r.custom_fields?.[c.key.replace('custom_fields.', '')] || '') :
+                                   (r[c.key] ?? '')
                         return String(val)
-                      })()
-                    }</td>
+                      })()}>
+                        {(() => {
+                          // stage_id should display stage name instead of numeric id
+                          if (c.key === 'stage_id') {
+                            const sid = r[c.key]
+                            if (!sid) return <span style={{ color: '#9ca3af' }}>-</span>
+                            const s = stages.find((st: any) => String(st.id) === String(sid))
+                            return (
+                              <span style={{ 
+                                backgroundColor: '#dbeafe', 
+                                color: '#1e40af', 
+                                padding: '2px 8px', 
+                                borderRadius: '12px', 
+                                fontSize: '12px',
+                                fontWeight: '500'
+                              }}>
+                                {s ? s.name : String(sid)}
+                              </span>
+                            )
+                          }
+
+                          const val = c.key === 'tags' ? (r.custom_fields?.tags || '') : 
+                                     c.key.startsWith('custom_fields.') ? (r.custom_fields?.[c.key.replace('custom_fields.', '')] || '') :
+                                     (r[c.key] ?? '')
+                          
+                          if (!val && val !== 0) return <span style={{ color: '#9ca3af' }}>-</span>
+                          
+                          // format timestamps
+                          if (c.key && (c.key.toLowerCase().includes('timestamp') || c.key === 'updated_at')) {
+                            try {
+                              const d = new Date(val)
+                              const today = new Date()
+                              if (d.toDateString() === today.toDateString()) {
+                                return <span style={{ color: '#059669' }}>{formatMessageTime(val)}</span>
+                              }
+                              return <span style={{ color: '#6b7280' }}>{formatFullDateTime(val)}</span>
+                            } catch (e) {
+                              return String(val)
+                            }
+                          }
+                          
+                          // 特殊处理email和phone的显示
+                          if (c.key === 'email' && val) {
+                            return <span style={{ color: '#3b82f6' }}>{String(val)}</span>
+                          }
+                          if (c.key === 'phone' && val) {
+                            return <span style={{ color: '#059669', fontFamily: 'monospace' }}>{String(val)}</span>
+                          }
+                          
+                          return String(val)
+                        })()}
+                      </div>
+                    </td>
                   ))}
-                  <td style={{ padding: 8 }}>
-                    <button onClick={() => openEditModal(r.id)} className="toolbar-button">编辑</button>
+                  <td style={{ padding: '12px 16px' }}>
+                    <button 
+                      onClick={() => openEditModal(r.id)} 
+                      style={{
+                        backgroundColor: '#3b82f6',
+                        color: 'white',
+                        border: 'none',
+                        padding: '6px 12px',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontWeight: '500',
+                        cursor: 'pointer',
+                        transition: 'background-color 0.15s ease'
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = '#2563eb'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = '#3b82f6'}
+                    >
+                      编辑
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -281,11 +512,63 @@ export default function CustomerList() {
         </div>
       )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 12 }}>
-        <div>共 {total} 条</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => fetchRows(Math.max(1, page - 1))} className="toolbar-button">上一页</button>
-          <button onClick={() => fetchRows(page + 1)} className="toolbar-button">下一页</button>
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          marginTop: 16,
+          padding: '12px 16px',
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          border: '1px solid #e5e7eb'
+        }}>
+          <div style={{ 
+            fontSize: '14px', 
+            color: '#6b7280',
+            fontWeight: '500'
+          }}>
+            共 <span style={{ color: '#374151', fontWeight: '600' }}>{total}</span> 条记录
+            {total > 0 && (
+              <span style={{ marginLeft: '8px' }}>
+                第 <span style={{ color: '#374151', fontWeight: '600' }}>{(page - 1) * limit + 1}</span> - 
+                <span style={{ color: '#374151', fontWeight: '600' }}>{Math.min(page * limit, total)}</span> 条
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button 
+              onClick={() => fetchRows(Math.max(1, page - 1))} 
+              disabled={page <= 1}
+              className="customer-button"
+              style={{
+                opacity: page <= 1 ? 0.5 : 1,
+                cursor: page <= 1 ? 'not-allowed' : 'pointer'
+              }}
+            >
+              ← 上一页
+            </button>
+            <span style={{ 
+              padding: '8px 12px',
+              backgroundColor: '#f3f4f6',
+              borderRadius: '6px',
+              fontSize: '14px',
+              fontWeight: '500',
+              color: '#374151'
+            }}>
+              {page}
+            </span>
+            <button 
+              onClick={() => fetchRows(page + 1)} 
+              disabled={rows.length < limit}
+              className="customer-button"
+              style={{
+                opacity: rows.length < limit ? 0.5 : 1,
+                cursor: rows.length < limit ? 'not-allowed' : 'pointer'
+              }}
+            >
+              下一页 →
+            </button>
+          </div>
         </div>
       </div>
 
@@ -418,7 +701,7 @@ export default function CustomerList() {
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
 

@@ -63,7 +63,8 @@ import {
   GuardNode,
   DelayNode,
   SendMessageNode,
-  TemplateNode
+  TemplateNode,
+  CustomAPINode
 } from './WorkflowNodes'
 
 // 导入节点配置
@@ -344,6 +345,21 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
           mode: 'visual',
           logic: "db.customer.stage == 'lead'",
           jsonlogic: ''
+        }
+        break
+      case 'CustomAPI':
+        nodeData.data = {
+          label: '自定义API',
+          description: '调用外部API',
+          name: '新API调用',
+          method: 'GET',
+          url: 'https://api.example.com/data',
+          headers: {},
+          body: '',
+          auth: { type: 'none' },
+          timeout: 30,
+          retry_count: 0,
+          response_mapping: {}
         }
         break
     }
@@ -1049,7 +1065,8 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
             GuardrailValidator: GuardNode,
             Delay: DelayNode,
             SendWhatsAppMessage: SendMessageNode,
-            Template: TemplateNode
+            Template: TemplateNode,
+            CustomAPI: CustomAPINode
           }), [])}
           defaultEdgeOptions={defaultEdgeOptions}
           connectionMode={ConnectionMode.Loose}

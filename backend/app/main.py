@@ -9,6 +9,8 @@ from app.db.database import init_db, create_default_subscription_plans
 from app.routers import customers, messages, tables, settings, auth, admin, plans, workflows, pipeline, dashboard, custom_objects, google_sheets, media, prompt_library, knowledge_base
 from app.metrics import metrics
 from fastapi.responses import JSONResponse
+import asyncio # Import asyncio
+from app.services.telegram_listener import TelegramListenerManager # Import TelegramListenerManager
 
 app = FastAPI(redirect_slashes=False)
 
@@ -35,12 +37,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ 启动时创建表
+# ✅ 全局 Telegram 监听器实例
+telegram_listener_instance = None
+
+async def ensure_telegram_listener():
+    """确保 Telegram 监听器正在运行"""
+    global telegram_listener_instance
+    try:
+        if not telegram_listener_instance:
+            telegram_listener_instance = TelegramListenerManager()
+        
+        # 检查监听器状态
+        if len(telegram_listener_instance._clients) == 0 and len(telegram_listener_instance._tasks) == 0:
+            logger.info("🔄 Telegram listener not running, starting...")
+            await telegram_listener_instance.start_listening_all_users()
+            logger.info("✅ Telegram listener started successfully")
+        else:
+            logger.info(f"✅ Telegram listener already running: {len(telegram_listener_instance._clients)} clients, {len(telegram_listener_instance._tasks)} tasks")
+    except Exception as e:
+        logger.error(f"❌ Failed to ensure Telegram listener: {e}")
+
+# ✅ 启动时创建表和启动 Telegram 监听器
 @app.on_event("startup")
-def on_startup():
+async def on_startup(): # Make it async
     init_db()
     create_default_subscription_plans()
+    await ensure_telegram_listener()
 
+@app.on_event("shutdown")
+async def on_shutdown(): # Add shutdown event
+    global telegram_listener_instance
+    if telegram_listener_instance:
+        await telegram_listener_instance.stop_listening_all_users()
+        logger.info("✅ Telegram listener stopped successfully")
+
+# ✅ 健康检查端点，可以用来手动触发监听器恢复
+@app.get("/health/telegram")
+async def telegram_health_check():
+    """Telegram 监听器健康检查和自动恢复"""
+    global telegram_listener_instance
+    try:
+        await ensure_telegram_listener()
+        
+        if telegram_listener_instance:
+            clients_count = len(telegram_listener_instance._clients)
+            tasks_count = len(telegram_listener_instance._tasks)
+            
+            return {
+                "status": "healthy" if (clients_count > 0 or tasks_count > 0) else "inactive",
+                "clients": clients_count,
+                "tasks": tasks_count,
+                "message": "Telegram listener is running" if (clients_count > 0 or tasks_count > 0) else "Telegram listener was restarted"
+            }
+        else:
+            return {"status": "error", "message": "Failed to initialize Telegram listener"}
+    except Exception as e:
+        logger.error(f"Telegram health check failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(auth.router, prefix="/auth", tags=["auth"])

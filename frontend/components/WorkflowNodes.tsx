@@ -16,10 +16,15 @@ import { Position } from 'reactflow'
 // 具体节点组件
 export const TriggerNode = ({ data, selected }: { data: any; selected: boolean }) => {
   const config = nodeConfigs.MessageTrigger
+  
+  // 根据 channel 显示不同的图标和描述
+  const channelIcon = data.channel === 'telegram' ? '📱' : data.channel === 'whatsapp' ? '💬' : '✉️'
+  const channelName = data.channel === 'telegram' ? 'Telegram' : data.channel === 'whatsapp' ? 'WhatsApp' : '消息'
+
   return <BaseNode data={{
     ...data,
-    description: data.triggerType || '消息触发',
-    content: data.config?.phone ? `📞 ${data.config.phone}` : '等待触发...'
+    description: `${channelIcon} ${channelName} 触发`,
+    content: data.config?.phone ? `📞 ${data.config.phone}` : '等待触发...' // content 保持不变，显示手机号或“等待触发”
   }} selected={selected} config={config} />
 }
 
@@ -81,10 +86,15 @@ export const DelayNode = ({ data, selected }: { data: any; selected: boolean }) 
 }
 
 export const SendMessageNode = ({ data, selected }: { data: any; selected: boolean }) => {
-  const config = nodeConfigs.SendWhatsAppMessage
+  const config = nodeConfigs.SendMessage
+  
+  // 根据 channel 显示不同的图标和描述
+  const channelIcon = data.channel === 'telegram' ? '📱' : data.channel === 'whatsapp' ? '💬' : '📤'
+  const channelName = data.channel === 'telegram' ? 'Telegram' : data.channel === 'whatsapp' ? 'WhatsApp' : '消息'
+  
   return <BaseNode data={{
     ...data,
-    description: data.retries?.max ? `最多重试 ${data.retries.max} 次` : '不重试',
+    description: `${channelIcon} ${channelName} 消息`,
     content: data.template ? data.template.slice(0, 50) + '...' : '使用 AI 回复'
   }} selected={selected} config={config} />
 }
@@ -123,4 +133,33 @@ export const ConditionNode = ({ data, selected }: { data: any; selected: boolean
   const summary = data.mode === 'jsonlogic' ? 'jsonlogic' : (data.logic || 'visual')
   const content = `条件: ${summary}`
   return <BaseNode data={{ ...data, description: 'Condition 条件节点', content }} selected={selected} config={config} />
+}
+
+export const CustomAPINode = ({ data, selected }: { data: any; selected: boolean }) => {
+  const config = nodeConfigs.CustomAPI
+  
+  // 获取 HTTP 方法的图标
+  const methodIcon = {
+    'GET': '🔍',
+    'POST': '📤', 
+    'PUT': '✏️',
+    'DELETE': '🗑️'
+  }[data.method || 'GET'] || '🔗'
+  
+  // 显示 API 名称或默认名称
+  const apiName = data.name || '自定义API'
+  
+  // 显示 URL 的简化版本
+  const urlPreview = data.url ? 
+    (data.url.length > 40 ? data.url.substring(0, 40) + '...' : data.url) : 
+    '未设置URL'
+  
+  // 显示认证状态
+  const authStatus = data.auth?.type && data.auth.type !== 'none' ? '🔐' : '🚫'
+  
+  return <BaseNode data={{
+    ...data,
+    description: `${methodIcon} ${apiName}`,
+    content: `${data.method || 'GET'} ${urlPreview}\n${authStatus} ${data.auth?.type || '无认证'}`
+  }} selected={selected} config={config} />
 }

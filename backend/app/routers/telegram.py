@@ -5,6 +5,7 @@ from app.db.database import SessionLocal
 from app.middleware.auth import get_current_user
 from app.core.config import settings
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 from app.services import telegram as telegram_service
@@ -78,6 +79,13 @@ def telegram_webhook(payload: Dict, db: Session = Depends(get_db)):
 
         if not chat_id or text is None:
             raise HTTPException(status_code=400, detail='chat_id and text required')
+
+        # 打印到终端用于调试（只截取前200字符以免日志过长）
+        try:
+            print(f"⏱️ {datetime.utcnow().isoformat()} - 收到 Telegram webhook: chat_id={chat_id}, from_id={from_id}, text={text}")
+        except Exception:
+            # 忽略打印错误，继续处理
+            pass
 
         # Try to find customer by JSON field safely; some DB backends may not support JSON path queries
         customer = None

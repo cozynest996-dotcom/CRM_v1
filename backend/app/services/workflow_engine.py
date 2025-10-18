@@ -1,6 +1,6 @@
 """
 Workflow Engine - 基于用户提供的 MVP 架构实现
-支持节点类型: MessageTrigger, AI, UpdateDB, Delay, SendWhatsAppMessage, Template, GuardrailValidator
+支持节点类型: MessageTrigger, AI, UpdateDB, Delay, SendWhatsAppMessage, Template, GuardrailValidator, CustomAPI
 
 模块说明:
 - 负责解析并执行工作流定义（nodes + edges），按顺序创建并调用对应的 NodeProcessor。
@@ -24,6 +24,9 @@ import random # 修复: 导入 random 模块
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from contextlib import asynccontextmanager
+import traceback
 from app.db.models import (
     Workflow, WorkflowExecution, WorkflowStepExecution, 
     Customer, Message, AIAnalysis, AuditLog, CustomEntityRecord # 导入 CustomEntityRecord
@@ -33,10 +36,106 @@ from app.services.whatsapp import WhatsAppService
 import pytz
 import re
 from app.services.telegram import TelegramService
+from app.services.settings import SettingsService
 import uuid
 import time
+import base64
+import tempfile
+import os
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors.rpcerrorlist import RPCError
+from fastapi import HTTPException
+import httpx # 新增: 导入 httpx
 
 logger = logging.getLogger(__name__)
+
+def serialize_for_json(obj):
+    """将对象序列化为 JSON 兼容的格式"""
+    if obj is None:
+        return None
+    elif hasattr(obj, '__dict__'):
+        # 数据库对象
+        if hasattr(obj, '__tablename__'):
+            # SQLAlchemy 模型对象
+            result = {}
+            for column in obj.__table__.columns:
+                value = getattr(obj, column.name)
+                if value is not None:
+                    if hasattr(value, 'isoformat'):  # datetime 对象
+                        result[column.name] = value.isoformat()
+                    else:
+                        result[column.name] = str(value)
+                else:
+                    result[column.name] = None
+            return result
+        else:
+            # 普通对象
+            result = obj.__dict__.copy()
+            result.pop('_sa_instance_state', None)
+            return {k: serialize_for_json(v) for k, v in result.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [serialize_for_json(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif hasattr(obj, 'isoformat'):  # datetime 对象
+        return obj.isoformat()
+    else:
+        return obj
+
+def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff_factor: float = 2.0):
+    """重试装饰器，用于处理临时性错误"""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (SQLAlchemyError, ConnectionError, TimeoutError) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        wait_time = delay * (backoff_factor ** attempt)
+                        logger.warning(f"Attempt {attempt + 1} failed for {func.__name__}: {e}. Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"All {max_retries} attempts failed for {func.__name__}: {e}")
+                        raise last_exception
+                except Exception as e:
+                    # 对于非临时性错误，直接抛出
+                    logger.error(f"Non-retryable error in {func.__name__}: {e}")
+                    raise e
+            raise last_exception
+        return wrapper
+    return decorator
+
+@asynccontextmanager
+async def safe_db_operation(db: Session, operation_name: str):
+    """安全的数据库操作上下文管理器"""
+    try:
+        yield db
+        db.commit()
+    except SQLAlchemyError as e:
+        logger.error(f"Database error in {operation_name}: {e}")
+        db.rollback()
+        raise e
+    except Exception as e:
+        logger.error(f"Unexpected error in {operation_name}: {e}")
+        db.rollback()
+        raise e
+
+async def _ensure_client_connect(client: TelegramClient, max_retries: int = 3, delay: float = 1.0):
+    """确保 TelegramClient 连接，带重试机制"""
+    for attempt in range(max_retries):
+        try:
+            if not client.is_connected():
+                await client.connect()
+            return
+        except Exception as e:
+            logger.warning(f"Client connect attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(delay)
+            else:
+                raise
 
 class WorkflowContext:
     """工作流执行上下文"""
@@ -75,65 +174,264 @@ class NodeProcessor:
         """执行节点并返回输出"""
         raise NotImplementedError
 
+    def _resolve_variable_from_context(self, variable_path: str, default: Any = None) -> Any:
+        """解析上下文中的变量"""
+        # 支持: trigger.X, db.customer.field, ai.field, api.response.field, settings.field
+        try:
+            # 1. 直接访问 context.variables (最常用)
+            if variable_path in self.context.variables:
+                return self.context.variables.get(variable_path)
+
+            # 2. 深度解析带点的路径 (如 'trigger.channel', 'ai.reply.reply_text')
+            parts = variable_path.split('.')
+            current_data = self.context.variables
+            for part in parts:
+                if isinstance(current_data, dict):
+                    current_data = current_data.get(part)
+                elif hasattr(current_data, part):
+                    current_data = getattr(current_data, part)
+                else:
+                    return default # 路径不存在
+            return current_data
+        except Exception as e:
+            logger.warning(f"解析变量 '{variable_path}' 失败: {e}")
+            return default
+
+    def _resolve_json_body_from_context(self, json_string: str) -> Any:
+        """解析 JSON 字符串中的所有变量"""
+        def replace_var(match):
+            var_path = match.group(1)
+            print(f"      🔍 JSON Body 中解析变量: {var_path}")
+            
+            # 使用与 _resolve_text_variables 相同的逻辑
+            resolved_value = None
+            
+            # 1. 优先尝试 'trigger' 相关变量
+            if var_path.startswith("trigger."):
+                trigger_data = self.context.get("trigger_data", {})
+                field_name = var_path.replace("trigger.", "")
+                resolved_value = trigger_data.get(field_name)
+                if resolved_value is not None:
+                    print(f"        ✅ 从 trigger 解析: {var_path} -> {resolved_value}")
+                else:
+                    print(f"        ❌ trigger 中未找到: {var_path}")
+            
+            # 2. 尝试 'db.customer' 相关变量
+            elif var_path.startswith("db.customer."):
+                customer = self.context.db.get("customer")
+                if customer:
+                    field_name = var_path.replace("db.customer.", "")
+                    if hasattr(customer, field_name):
+                        resolved_value = getattr(customer, field_name)
+                        print(f"        ✅ 从 db.customer 解析: {var_path} -> {resolved_value}")
+                    else:
+                        print(f"        ❌ customer 对象没有字段: {field_name}")
+                else:
+                    print(f"        ❌ 上下文中没有 customer 对象")
+            
+            # 3. 尝试 'custom_fields' 相关变量
+            elif var_path.startswith("custom_fields."):
+                customer = self.context.db.get("customer")
+                if customer and hasattr(customer, 'custom_fields'):
+                    field_name = var_path.replace("custom_fields.", "")
+                    custom_fields = customer.custom_fields or {}
+                    resolved_value = custom_fields.get(field_name)
+                    if resolved_value is not None:
+                        print(f"        ✅ 从 custom_fields 解析: {var_path} -> {resolved_value}")
+                    else:
+                        print(f"        ❌ custom_fields 中未找到: {field_name}")
+                else:
+                    print(f"        ❌ customer 对象没有 custom_fields")
+            
+            # 4. 尝试从 AI 输出中解析
+            elif var_path.startswith("ai."):
+                ai_data = self.context.ai
+                field_name = var_path.replace("ai.", "")
+                resolved_value = ai_data.get(field_name) if ai_data else None
+                if resolved_value is not None:
+                    print(f"        ✅ 从 ai 解析: {var_path} -> {resolved_value}")
+                else:
+                    print(f"        ❌ ai 中未找到: {var_path}")
+            
+            # 5. 尝试从 API 响应中解析
+            elif var_path.startswith("api."):
+                api_data = self.context.get("api.response", {})
+                field_name = var_path.replace("api.", "")
+                resolved_value = api_data.get(field_name) if api_data else None
+                if resolved_value is not None:
+                    print(f"        ✅ 从 api.response 解析: {var_path} -> {resolved_value}")
+                else:
+                    print(f"        ❌ api.response 中未找到: {var_path}")
+            
+            # 6. 尝试 'customer' 相关变量（兼容格式）
+            elif var_path.startswith("customer."):
+                customer = self.context.db.get("customer")
+                if customer:
+                    field_name = var_path.replace("customer.", "")
+                    
+                    # 特殊处理一些常见的字段映射
+                    if field_name == "last_message":
+                        # 获取最后一条消息内容
+                        trigger_data = self.context.get("trigger_data", {})
+                        resolved_value = trigger_data.get("message")
+                        if resolved_value is not None:
+                            print(f"        ✅ 从 customer.last_message (trigger) 解析: {var_path} -> {resolved_value}")
+                        else:
+                            print(f"        ❌ customer.last_message 未找到触发消息")
+                    elif hasattr(customer, field_name):
+                        resolved_value = getattr(customer, field_name)
+                        print(f"        ✅ 从 customer 解析: {var_path} -> {resolved_value}")
+                    else:
+                        print(f"        ❌ customer 对象没有字段: {field_name}")
+                else:
+                    print(f"        ❌ 上下文中没有 customer 对象")
+            
+            # 7. 直接从上下文变量中查找
+            else:
+                resolved_value = self.context.get(var_path)
+                if resolved_value is not None:
+                    print(f"        ✅ 从 context 解析: {var_path} -> {resolved_value}")
+                else:
+                    print(f"        ❌ context 中未找到: {var_path}")
+            
+            # 对于 JSON 字符串中的变量替换，我们需要返回字符串内容而不是 JSON 值
+            # 这样多个变量可以连接在一起形成一个完整的字符串
+            if resolved_value is None:
+                print(f"        ⚠️ 变量未解析，使用空字符串: {var_path}")
+                return ""  # 返回空字符串，这样可以与其他字符串连接
+            else:
+                print(f"        📝 变量解析为字符串: {var_path} -> {resolved_value}")
+                return str(resolved_value)  # 直接返回字符串值，不进行 JSON 编码
+
+        # 首先进行变量替换，得到处理后的字符串
+        processed_json_string = re.sub(r'\{\{([^}]+)\}\}', replace_var, json_string)
+        print(f"    变量替换后的 JSON 字符串: {processed_json_string}")
+        
+        try:
+            # 重新解析为 JSON 对象
+            return json.loads(processed_json_string)
+        except json.JSONDecodeError as e:
+            logger.error(f"无法解析 JSON 请求体，可能包含无效变量或格式错误: {e}")
+            logger.error(f"处理后的 JSON 字符串: {processed_json_string}")
+            raise ValueError(f"无效的 JSON 请求体: {e}")
+
 class MessageTriggerProcessor(NodeProcessor):
     """消息触发器节点"""
     
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         """处理消息触发"""
-        channel = node_config.get("channel", "whatsapp")
-        match_key = node_config.get("match_key", "Phone")
+        # 🔧 修复：正确获取节点配置中的渠道设置
+        node_data = node_config.get("data", {})
+        node_config_inner = node_data.get("config", {})
+        
+        # 优先从 data.config 获取，然后从 data 获取，最后回退到根级别
+        channel = (node_config_inner.get("channel") or 
+                  node_data.get("channel") or 
+                  node_config.get("channel", "whatsapp"))
+        
+        match_key = (node_config_inner.get("match_key") or 
+                    node_data.get("match_key") or 
+                    node_config.get("match_key", "Phone"))
         
         # 从触发数据中获取消息信息
         trigger_data = self.context.get("trigger_data", {})
         
-        if channel == "whatsapp" and match_key == "Phone":
+        # 🆕 添加渠道匹配验证：只有当触发渠道与节点配置渠道匹配时才继续执行
+        trigger_channel = trigger_data.get("channel", "whatsapp")
+        
+        print(f"🔍 MessageTrigger 渠道匹配检查:")
+        print(f"  节点配置渠道: {channel}")
+        print(f"  触发数据渠道: {trigger_channel}")
+        print(f"  节点配置详情:")
+        print(f"    - data.config.channel: {node_config_inner.get('channel')}")
+        print(f"    - data.channel: {node_data.get('channel')}")
+        print(f"    - root.channel: {node_config.get('channel')}")
+        
+        if channel != trigger_channel:
+            print(f"  ❌ 渠道不匹配，跳过此工作流")
+            # 渠道不匹配，返回空结果，不继续执行工作流
+            raise ValueError(f"Channel mismatch: trigger channel '{trigger_channel}' does not match node channel '{channel}'")
+        
+        print(f"  ✅ 渠道匹配，继续执行工作流")
+        
+        if channel in ("whatsapp", "telegram"):
+            # normalize incoming trigger fields
             phone = trigger_data.get("phone")
-            message_content = trigger_data.get("message")
-            
+            chat_id = trigger_data.get("chat_id") or trigger_data.get("telegram_chat_id")
+            message_content = trigger_data.get("message") or trigger_data.get("content")
+
             # 🔒 從觸發數據獲取 user_id
             user_id = trigger_data.get("user_id")
             if not user_id:
                 logger.error("Workflow trigger missing user_id")
                 raise ValueError("Workflow trigger missing user_id")
-            
+
             # 🔒 獲取屬於特定用戶的客戶信息
-            customer = self.db.query(Customer).filter(
-                Customer.phone == phone,
-                Customer.user_id == user_id
-            ).first()
-            
+            # For Telegram prefer matching by telegram_chat_id (chat id) if available, else fall back to phone
+            customer = None
+            if channel == "telegram" and chat_id:
+                customer = self.db.query(Customer).filter(
+                    Customer.telegram_chat_id == str(chat_id),
+                    Customer.user_id == user_id
+                ).first()
+            if not customer and phone:
+                customer = self.db.query(Customer).filter(
+                    Customer.phone == phone,
+                    Customer.user_id == user_id
+                ).first()
+
             if not customer:
                 # 🔒 創建新客戶時設置正確的 user_id
                 customer = Customer(
-                    phone=phone,
-                    name=phone,  # 临时使用电话号码作为名字
+                    phone=phone or None,
+                    name=phone or (chat_id and f"tg_{chat_id}") or "unknown",
                     status="active",
-                    user_id=user_id
+                    user_id=user_id,
+                    telegram_chat_id=str(chat_id) if chat_id else None
                 )
                 self.db.add(customer)
                 self.db.commit()
                 self.db.refresh(customer)
-            
+
             # 🔒 获取聊天历史（最近5条，僅限該用戶）
             chat_history = self.db.query(Message).filter(
                 Message.customer_id == customer.id,
                 Message.user_id == user_id
             ).order_by(Message.timestamp.desc()).limit(5).all()
-            
+
             # 更新上下文
             self.context.chat["last_message"] = message_content
             self.context.chat["history"] = [
-                {"content": msg.content, "direction": msg.direction} 
+                {"content": msg.content, "direction": msg.direction}
                 for msg in reversed(chat_history)
             ]
-            self.context.actor["phone"] = phone
+            # actor info: include both phone and chat_id when available
+            if phone:
+                self.context.actor["phone"] = phone
+            if chat_id:
+                self.context.actor["chat_id"] = chat_id
             self.context.db["customer"] = customer
+
+            # 创建可序列化的客户信息
+            customer_data = {
+                "id": str(customer.id),
+                "name": customer.name,
+                "phone": customer.phone,
+                "status": customer.status,
+                "user_id": customer.user_id,
+                "telegram_chat_id": customer.telegram_chat_id
+            }
             
-            return {
+            result = {
                 "ctx.chat.last_message": message_content,
                 "ctx.chat.history": self.context.chat["history"],
-                "ctx.actor.phone": phone
+                "ctx.db.customer": customer_data  # 使用可序列化的数据
             }
+            if phone:
+                result["ctx.actor.phone"] = phone
+            if chat_id:
+                result["ctx.actor.chat_id"] = chat_id
+            return result
         
         raise ValueError(f"Unsupported channel: {channel} or match_key: {match_key}")
 
@@ -194,6 +492,58 @@ class AIProcessor(NodeProcessor):
             logger.error(f"Failed to get chat history: {e}")
             return ""
     
+    def _generate_data_update_prompt(self, update_fields: list) -> str:
+        """根据配置的字段生成数据更新的 System Prompt 部分"""
+        if not update_fields:
+            return ""
+        
+        enabled_fields = [f for f in update_fields if f.get('enabled', True)]
+        if not enabled_fields:
+            return ""
+        
+        prompt_parts = ["请分析客户消息并提取以下信息：\n"]
+        
+        for i, field in enumerate(enabled_fields, 1):
+            field_name = field.get('field_name', '')
+            output_key = field.get('output_key', '')
+            data_type = field.get('data_type', 'string')
+            description = field.get('description', '')
+            example = field.get('example', '')
+            
+            prompt_parts.append(f"{i}. {output_key} ({field_name}):")
+            if description:
+                prompt_parts.append(f"   {description}")
+            prompt_parts.append(f"   数据类型: {data_type}")
+            if example:
+                prompt_parts.append(f"   示例: {example}")
+            prompt_parts.append("")
+        
+        return "\n".join(prompt_parts)
+
+    def _generate_reply_style_prompt(self, reply_config: dict) -> str:
+        """根据回复配置生成回复风格的 System Prompt 部分"""
+        if not reply_config.get('enable_auto_reply', False):
+            return ""
+        
+        style_map = {
+            'professional': '采用专业正式的语调',
+            'friendly': '采用友好亲切的语调',
+            'casual': '采用轻松随意的语调',
+            'enthusiastic': '采用热情积极的语调'
+        }
+        
+        style = reply_config.get('reply_style', 'professional')
+        max_length = reply_config.get('reply_max_length', 700)
+        
+        prompt_parts = [
+            f"回复要求：",
+            f"- {style_map.get(style, '采用专业正式的语调')}",
+            f"- 回复长度不超过 {max_length} 个字符",
+            f"- 内容要有帮助且相关"
+        ]
+        
+        return "\n".join(prompt_parts)
+
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         """执行 AI 分析和回复生成"""
         print(f"\n🤖 AI節點開始執行...")
@@ -211,15 +561,92 @@ class AIProcessor(NodeProcessor):
             node_data = node_config.get("data", {})
             
             # 获取客户数据以确定阶段
-            customer = self.context.db.get("customer")
+            customer = self.context.db.get("customer", None)
             
-            # 使用数据库中存储的 system_prompt 作为基础 prompt
-            raw_system_prompt = node_data.get("system_prompt", node_config.get("system_prompt", "You are a professional AI assistant."))
-            raw_user_prompt = node_data.get("user_prompt", node_config.get("user_prompt", "Please reply to the user's message."))
+            # 🆕 新的配置结构处理
+            enable_data_update = node_data.get("enable_data_update", False)
+            enable_auto_reply = node_data.get("enable_auto_reply", False)
+            enable_handoff = node_data.get("enable_handoff", False)
+            
+            # 🆕 生成动态 System Prompt
+            system_prompt_parts = []
+            
+            # 首先添加原始的 system_prompt（如果存在）
+            original_system_prompt = node_data.get("system_prompt", "")
+            if original_system_prompt:
+                system_prompt_parts.append(original_system_prompt)
+            else:
+                system_prompt_parts.append("你是一个专业的客户服务 AI 助手。")
+            
+            # 添加数据更新指令
+            if enable_data_update:
+                update_fields = node_data.get("update_fields", [])
+                data_update_prompt = self._generate_data_update_prompt(update_fields)
+                if data_update_prompt:
+                    system_prompt_parts.append(data_update_prompt)
+            
+            # 添加回复生成指令
+            if enable_auto_reply:
+                reply_prompt = self._generate_reply_style_prompt(node_data)
+                if reply_prompt:
+                    system_prompt_parts.append(reply_prompt)
+            
+            # 🆕 构建 JSON 输出格式要求
+            json_schema = {
+                "analyze": {
+                    "updates": {},
+                    "confidence": 0.0,
+                    "reason": "Brief explanation"
+                },
+                "reply": {
+                    "reply_text": "Your response to customer" if enable_auto_reply else "",
+                },
+                "meta": {
+                    "used_profile": "ai_assistant",
+                    "safe_to_send_before_db_update": True
+                }
+            }
+            
+            # 添加 Handoff 配置
+            if enable_handoff:
+                json_schema["meta"]["handoff"] = {
+                    "triggered": False,
+                    "reason": None,
+                    "confidence": 0.0
+                }
+                
+                handoff_threshold = node_data.get("handoff_threshold", 0.6)
+                system_prompt_parts.append(f"""
+HANDOFF 规则：
+- 当你的置信度低于 {handoff_threshold} 时，设置 "meta.handoff.triggered": true
+- 在 "meta.handoff.reason" 中说明转接原因
+- 始终在 "analyze.confidence" 中提供你的置信度评分 (0.0-1.0)
+""")
+            
+            # 添加 JSON 格式要求
+            system_prompt_parts.append(f"""
+输出格式要求：
+你必须返回有效的 JSON 格式，结构如下：
+{json.dumps(json_schema, indent=2, ensure_ascii=False)}
+
+重要：只返回 JSON，不要添加任何其他文本或 markdown 格式。
+""")
+            
+            # 合并所有部分
+            base_system_prompt = "\n\n".join(system_prompt_parts)
             
             # 🔧 解析 System Prompt 中的变量
-            base_system_prompt = await self._resolve_prompt_variables(raw_system_prompt)
-            user_prompt = await self._resolve_prompt_variables(raw_user_prompt)
+            system_prompt = await self._resolve_prompt_variables(base_system_prompt)
+            
+            # 构建 User Prompt
+            # 首先尝试使用配置的 user_prompt，如果没有则使用默认格式
+            configured_user_prompt = node_data.get("user_prompt", "")
+            if configured_user_prompt:
+                user_prompt = configured_user_prompt
+            else:
+                trigger_data = self.context.get("trigger_data", {})
+                trigger_content = trigger_data.get("message", trigger_data.get("content", ""))
+                user_prompt = f"客户刚刚发送的最新消息：{trigger_content}\n\n请根据以上消息内容进行分析和回复。"
 
             # 🔧 处理聊天历史配置
             chat_history_config = node_data.get("chat_history", {})
@@ -344,7 +771,7 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
             print(f"  Model Config: {model_config}")
             
             # 确保上下文中有 customer（容错：如果 MessageTrigger 没先运行）
-            if not self.context.db.get("customer"):
+            if not self.context.db.get("customer", None):
                 trigger = self.context.get("trigger_data", {})
                 phone = trigger.get("phone")
                 user_id = trigger.get("user_id")
@@ -358,7 +785,7 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
 
             # 初始化 ai_service（用最新的 user_id）
             if not self.ai_service:
-                customer = self.context.db.get("customer")
+                customer = self.context.db.get("customer", None)
                 user_id = customer.user_id if customer else None
                 self.ai_service = AIService(db_session=self.db_session, user_id=user_id)
 
@@ -375,6 +802,13 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
                     print(f"  📡 發送請求到 OpenAI...")
                     # 获取媒体设置
                     media_settings = node_data.get("media_settings", {})
+                    
+                    # 调试：检查 system_prompt 中的媒体标记
+                    import re
+                    media_pattern = r'\[\[MEDIA:([a-f0-9\-]{36})\]\]'
+                    media_matches = re.findall(media_pattern, system_prompt)
+                    print(f"  🖼️ System Prompt 中发现媒体 UUID: {media_matches}")
+                    
                     llm_response = await self.ai_service.generate_combined_response(
                         system_prompt=system_prompt,
                         user_prompt=resolved_user_prompt,
@@ -387,10 +821,9 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
                     
                     # 美化并打印完整的LLM输出
                     try:
-                        import json
-                        # print("--- 完整的LLM原始输出 (美化JSON) ---") # Remove verbose LLM output print
-                        # print(json.dumps(llm_response, indent=2, ensure_ascii=False)) # Remove verbose LLM output print
-                        # print("--- LLM原始输出结束 ---") # Remove verbose LLM output print
+                        print("--- 🤖 AI 完整 JSON 响应开始 ---")
+                        print(json.dumps(llm_response, indent=2, ensure_ascii=False))
+                        print("--- 🤖 AI 完整 JSON 响应结束 ---")
                     except Exception as e:
                         print(f"  ⚠️ 打印LLM原始输出失败: {e}")
 
@@ -410,7 +843,7 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
                     self.context.ai['api_used'] = "openai"
                     
                     # 保存 AI 分析结果到数据库
-                    customer = self.context.db.get("customer")
+                    customer = self.context.db.get("customer", None)
                     message = self.db.query(Message).filter(Message.customer_id == customer.id).order_by(Message.timestamp.desc()).first()
                     
                     if customer: # 只有当有客户时才保存分析结果
@@ -571,68 +1004,166 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
 
     async def _resolve_prompt_variables(self, prompt: str) -> str:
         """解析 prompt 中的变量并返回解析后的字符串
-
-        支持变量: {{trigger.name}}, {{trigger.phone}}, {{trigger.content}}, {{trigger.timestamp}},
-        以及 {{db.customer.<field>}}。
-        """
-        resolved_prompt = prompt or ""
         
-        # print(f"  🔍 解析 Prompt 变量前: {resolved_prompt[:100]}...") # Remove verbose pre-resolution print
-
+        使用通用变量解析机制，支持 PromptFormModal 中定义的所有变量类型：
+        - 触发器数据: {{trigger.name}}, {{trigger.phone}}, {{trigger.message}}, {{trigger.chat_id}}, {{trigger.timestamp}}, {{trigger.user_id}}, {{trigger.channel}}
+        - 客户基础信息: {{customer.name}}, {{customer.phone}}, {{customer.email}}, {{customer.status}}, {{customer.last_message}}
+        - 客户自定义字段: {{custom_fields.field_name}}
+        - AI 输出: {{ai.reply.reply_text}}, {{ai.analyze}}, {{ai.analyze.confidence}}
+        - API 响应: {{api.response.data}}, {{api.response.status_code}}
+        - 数据库字段: {{db.customer.field_name}}
+        """
+        if not prompt:
+            return ""
+            
+        print(f"  🔍 AI Prompt 变量解析开始...")
+        print(f"    原始 Prompt: {prompt[:100]}...")
+        
         try:
-            # 获取触发器数据
-            trigger_data = self.context.get("trigger_data", {}) or {}
-            # print(f"  📎 触发器数据: {trigger_data}") # Remove verbose trigger data print
-
-            # 修正字段映射：模板中使用 content，但触发器中为 message
-            if "{{trigger.name}}" in resolved_prompt:
-                name_value = str(trigger_data.get("name", ""))
-                resolved_prompt = resolved_prompt.replace("{{trigger.name}}", name_value)
-                # print(f"    - 替换 {{{{trigger.name}}}} -> '{name_value}'")
+            # 使用正则表达式找到所有 {{variable}} 格式的变量
+            import re
+            pattern = r'\{\{([^}]+)\}\}'
+            
+            def replace_variable(match):
+                var_path = match.group(1).strip()
+                print(f"    🔍 解析变量: {var_path}")
                 
-            if "{{trigger.phone}}" in resolved_prompt:
-                phone_value = str(trigger_data.get("phone", ""))
-                resolved_prompt = resolved_prompt.replace("{{trigger.phone}}", phone_value)
-                # print(f"    - 替换 {{{{trigger.phone}}}} -> '{phone_value}'")
+                # 获取上下文数据
+                trigger_data = self.context.get("trigger_data", {})
+                customer = self.context.get("ctx.db.customer")
+                ai_data = self.context.get("ai", {})
+                api_data = self.context.get("api", {})
                 
-            if "{{trigger.content}}" in resolved_prompt:
-                content_value = str(trigger_data.get("message", ""))
-                resolved_prompt = resolved_prompt.replace("{{trigger.content}}", content_value)
-                # print(f"    - 替换 {{{{trigger.content}}}} -> '{content_value}'")
+                # 1. 触发器变量
+                if var_path.startswith("trigger."):
+                    field = var_path[8:]  # 移除 "trigger." 前缀
+                    
+                    # 字段映射处理
+                    if field == "content":
+                        field = "message"  # content -> message
+                    elif field == "user_id":
+                        field = "user_id"
+                    
+                    value = trigger_data.get(field)
+                    if value is not None:
+                        print(f"      ✅ 从 trigger 解析: {var_path} -> {value}")
+                        return str(value)
+                    else:
+                        print(f"      ❌ trigger 中未找到: {var_path}")
                 
-            if "{{trigger.timestamp}}" in resolved_prompt:
-                timestamp_value = str(trigger_data.get("timestamp", ""))
-                resolved_prompt = resolved_prompt.replace("{{trigger.timestamp}}", timestamp_value)
-                # print(f"    - 替换 {{{{trigger.timestamp}}}} -> '{timestamp_value}'")
-
-            # 客户字段替换
-            customer = self.context.db.get("customer")
-            if customer:
-                if "{{db.customer.name}}" in resolved_prompt:
-                    customer_name = str(getattr(customer, "name", ""))
-                    resolved_prompt = resolved_prompt.replace("{{db.customer.name}}", customer_name)
-                    # print(f"    - 替换 {{{{db.customer.name}}}} -> '{customer_name}'")
+                # 2. 客户基础信息变量
+                elif var_path.startswith("customer."):
+                    field = var_path[9:]  # 移除 "customer." 前缀
                     
-                if "{{db.customer.phone}}" in resolved_prompt:
-                    customer_phone = str(getattr(customer, "phone", ""))
-                    resolved_prompt = resolved_prompt.replace("{{db.customer.phone}}", customer_phone)
-                    # print(f"    - 替换 {{{{db.customer.phone}}}} -> '{customer_phone}'")
+                    if customer:
+                        # 特殊处理 last_message
+                        if field == "last_message":
+                            value = trigger_data.get("message", "")
+                            print(f"      ✅ 客户最后消息: {var_path} -> {value}")
+                            return str(value)
+                        
+                        # 标准客户字段
+                        value = getattr(customer, field, None)
+                        if value is not None:
+                            print(f"      ✅ 从 customer 解析: {var_path} -> {value}")
+                            return str(value)
+                        
+                        # 尝试从客户自定义字段中获取
+                        if hasattr(customer, 'custom_fields') and customer.custom_fields:
+                            custom_value = customer.custom_fields.get(field)
+                            if custom_value is not None:
+                                print(f"      ✅ 从客户自定义字段解析: {var_path} -> {custom_value}")
+                                return str(custom_value)
                     
-                if "{{db.customer.status}}" in resolved_prompt:
-                    customer_status = str(getattr(customer, "status", ""))
-                    resolved_prompt = resolved_prompt.replace("{{db.customer.status}}", customer_status)
-                    # print(f"    - 替换 {{{{db.customer.status}}}} -> '{customer_status}'")
+                    print(f"      ❌ customer 中未找到: {var_path}")
+                
+                # 3. 客户自定义字段变量
+                elif var_path.startswith("custom_fields."):
+                    field = var_path[14:]  # 移除 "custom_fields." 前缀
                     
-                if "{{db.customer.email}}" in resolved_prompt:
-                    customer_email = str(getattr(customer, "email", ""))
-                    resolved_prompt = resolved_prompt.replace("{{db.customer.email}}", customer_email)
-                    # print(f"    - 替换 {{{{db.customer.email}}}} -> '{customer_email}'")
-
+                    if customer and hasattr(customer, 'custom_fields') and customer.custom_fields:
+                        value = customer.custom_fields.get(field)
+                        if value is not None:
+                            print(f"      ✅ 从自定义字段解析: {var_path} -> {value}")
+                            return str(value)
+                    
+                    print(f"      ❌ 自定义字段中未找到: {var_path}")
+                
+                # 4. 数据库客户字段变量 (兼容旧格式)
+                elif var_path.startswith("db.customer."):
+                    field = var_path[12:]  # 移除 "db.customer." 前缀
+                    
+                    if customer:
+                        value = getattr(customer, field, None)
+                        if value is not None:
+                            print(f"      ✅ 从 db.customer 解析: {var_path} -> {value}")
+                            return str(value)
+                    
+                    print(f"      ❌ db.customer 中未找到: {var_path}")
+                
+                # 5. AI 输出变量
+                elif var_path.startswith("ai."):
+                    path_parts = var_path.split('.')
+                    current = ai_data
+                    
+                    try:
+                        for part in path_parts[1:]:  # 跳过 "ai"
+                            if isinstance(current, dict):
+                                current = current[part]
+                            else:
+                                current = getattr(current, part)
+                        
+                        if current is not None:
+                            print(f"      ✅ 从 AI 数据解析: {var_path} -> {current}")
+                            return str(current)
+                    except (KeyError, AttributeError):
+                        pass
+                    
+                    print(f"      ❌ AI 数据中未找到: {var_path}")
+                
+                # 6. API 响应变量
+                elif var_path.startswith("api."):
+                    path_parts = var_path.split('.')
+                    current = api_data
+                    
+                    try:
+                        for part in path_parts[1:]:  # 跳过 "api"
+                            if isinstance(current, dict):
+                                current = current[part]
+                            else:
+                                current = getattr(current, part)
+                        
+                        if current is not None:
+                            print(f"      ✅ 从 API 数据解析: {var_path} -> {current}")
+                            return str(current)
+                    except (KeyError, AttributeError):
+                        pass
+                    
+                    print(f"      ❌ API 数据中未找到: {var_path}")
+                
+                # 7. 其他上下文变量
+                else:
+                    # 尝试直接从上下文获取
+                    value = self.context.get(var_path)
+                    if value is not None:
+                        print(f"      ✅ 从上下文解析: {var_path} -> {value}")
+                        return str(value)
+                    
+                    print(f"      ❌ 上下文中未找到: {var_path}")
+                
+                # 如果都找不到，返回原始变量
+                print(f"      ⚠️ 变量未解析，保持原样: {var_path}")
+                return f"{{{{{var_path}}}}}"
+            
+            # 执行变量替换
+            resolved_prompt = re.sub(pattern, replace_variable, prompt)
+            
+            print(f"  ✅ AI Prompt 变量解析完成: {resolved_prompt[:100]}...")
+            return resolved_prompt
+            
         except Exception as err:
-            print(f"  ⚠️ 解析 prompt 变量失败: {err}")
-
-        print(f"  ✅ 解析 Prompt 变量后: {resolved_prompt[:100]}...")
-        return resolved_prompt
+            print(f"  ⚠️ 解析 AI prompt 变量失败: {err}")
+            return prompt
     
     async def _simulate_ai_response(self, system_prompt: str, user_prompt: str, model_config: dict) -> str:
         """模拟AI响应（实际应该调用OpenAI API）"""
@@ -682,103 +1213,344 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
 class UpdateDBProcessor(NodeProcessor):
     """数据库更新节点"""
     
-    async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
-        """更新数据库"""
-        table = node_config.get("table", "customers")
-        match_key = node_config.get("match_key", "Phone")
-        ops = node_config.get("ops", [])
-        optimistic_lock = node_config.get("optimistic_lock", {"enabled": True})
-        skip_if_equal = node_config.get("skip_if_equal", True)
+    async def _resolve_match_value(self, match_value: str) -> str:
+        """解析匹配值中的变量"""
+        if not match_value:
+            return ""
         
-        if table != "customers":
-            raise ValueError(f"Unsupported table: {table}")
+        resolved_value = match_value
         
-        customer = self.context.db.get("customer")
-        if not customer:
-            raise ValueError("Customer not found in context")
+        # 解析触发器变量
+        trigger_data = self.context.get("trigger_data", {})
+        if "{{trigger.phone}}" in resolved_value:
+            phone_value = str(trigger_data.get("phone", ""))
+            resolved_value = resolved_value.replace("{{trigger.phone}}", phone_value)
         
-        # 获取 AI 分析结果
-        ai_analyze = self.context.get("ai.analyze", {})
-        updates = ai_analyze.get("updates", {})
+        if "{{trigger.chat_id}}" in resolved_value:
+            chat_id_value = str(trigger_data.get("chat_id", ""))
+            resolved_value = resolved_value.replace("{{trigger.chat_id}}", chat_id_value)
         
-        if not updates and skip_if_equal:
-            return {"db.updated_row": customer, "ctx.versions.db": customer.version}
-        
-        # 乐观锁检查
-        if optimistic_lock.get("enabled", True):
-            current_version = customer.version
-            expected_version = optimistic_lock.get("incoming_version", current_version)
-            
-            if current_version != expected_version:
-                conflict_strategy = optimistic_lock.get("on_conflict", "prompt")
-                if conflict_strategy == "abort":
-                    raise ValueError("Version conflict detected")
-                # 其他冲突处理策略可以在这里实现
-        
-        # 记录旧值用于审计
-        old_values = {
-            "move_in_date": customer.move_in_date.isoformat() if customer.move_in_date else None,
-            "custom_fields": customer.custom_fields.copy()
-        }
-        
-        # 应用更新
+        return resolved_value
+
+    async def _apply_smart_updates(self, customer, ai_updates: dict) -> tuple[bool, dict, dict]:
+        """应用智能更新（AI 输出的 updates）"""
         has_changes = False
+        old_values = {}
         new_values = {}
         
-        for op in ops:
-            col = op.get("col")
-            value = op.get("value")
-            mode = op.get("mode", "set")
+        for field_name, field_value in ai_updates.items():
+            if field_value is None:
+                continue
+                
+            # 记录旧值
+            if hasattr(customer, field_name):
+                old_value = getattr(customer, field_name)
+                if old_value is not None:
+                    if hasattr(old_value, 'isoformat'):  # datetime/date 对象
+                        old_values[field_name] = old_value.isoformat()
+                    else:
+                        old_values[field_name] = old_value
+                else:
+                    old_values[field_name] = None
+            elif field_name.startswith('custom_fields.') or field_name.startswith('customer.custom.'):
+                # 处理自定义字段
+                if field_name.startswith('customer.custom.'):
+                    custom_field_key = field_name.replace('customer.custom.', '')
+                else:
+                    custom_field_key = field_name.replace('custom_fields.', '')
+                current_custom_fields = customer.custom_fields or {}
+                print(f"    🔍 调试 custom_fields 原始值: {current_custom_fields} (类型: {type(current_custom_fields)})")
+                old_value = current_custom_fields.get(custom_field_key)
+                old_values[field_name] = old_value
+                print(f"    🔍 自定义字段 {field_name}: 当前值 = {old_value}, 新值 = {field_value}")
             
-            if col == "move_in_date" and "Move-In Date" in updates:
-                try:
-                    new_val = datetime.strptime(updates["Move-In Date"], "%Y-%m-%d").date()
-                    if customer.move_in_date != new_val:
-                        customer.move_in_date = new_val
-                        new_values["move_in_date"] = new_val.isoformat()
-                        has_changes = True
-                except ValueError:
-                    logger.warning(f"Invalid date format: {updates['Move-In Date']}")
+            # 应用新值
+            try:
+                if field_name.startswith('custom_fields.') or field_name.startswith('customer.custom.'):
+                    # 更新自定义字段
+                    if field_name.startswith('customer.custom.'):
+                        custom_field_key = field_name.replace('customer.custom.', '')
+                    else:
+                        custom_field_key = field_name.replace('custom_fields.', '')
                     
-            elif col == "custom_fields" and mode == "merge_json":
-                # 合并自定义字段
-                custom_updates = {k: v for k, v in updates.items() if k.startswith("Custom:")}
-                if custom_updates:
-                    current_custom = customer.custom_fields.copy()
-                    current_custom.update(custom_updates)
-                    customer.custom_fields = current_custom
-                    new_values["custom_fields"] = custom_updates
+                    if customer.custom_fields is None:
+                        customer.custom_fields = {}
+                        print(f"    🆕 初始化 custom_fields 为空字典")
+                    
+                    current_value = customer.custom_fields.get(custom_field_key)
+                    print(f"    🔄 比较值: 当前 {current_value} ({type(current_value)}) vs 新值 {field_value} ({type(field_value)})")
+                    
+                    if current_value != field_value:
+                        customer.custom_fields[custom_field_key] = field_value
+                        new_values[field_name] = field_value
+                        has_changes = True
+                        print(f"    ✅ 更新 {field_name}: {current_value} -> {field_value}")
+                    else:
+                        print(f"    ⏭️ 跳过 {field_name}: 值相同 ({current_value})")
+                        
+                elif hasattr(customer, field_name):
+                    # 更新基础字段
+                    current_value = getattr(customer, field_name)
+                    
+                    # 类型转换
+                    if field_name in ['move_in_date'] and isinstance(field_value, str):
+                        try:
+                            field_value = datetime.strptime(field_value, "%Y-%m-%d").date()
+                        except ValueError:
+                            logger.warning(f"Invalid date format for {field_name}: {field_value}")
+                            continue
+                    elif field_name in ['budget_min', 'budget_max'] and isinstance(field_value, str):
+                        try:
+                            field_value = float(field_value)
+                        except ValueError:
+                            logger.warning(f"Invalid number format for {field_name}: {field_value}")
+                            continue
+                    
+                    if current_value != field_value:
+                        setattr(customer, field_name, field_value)
+                        if hasattr(field_value, 'isoformat'):
+                            new_values[field_name] = field_value.isoformat()
+                        else:
+                            new_values[field_name] = field_value
+                        has_changes = True
+                        
+            except Exception as e:
+                logger.error(f"Error updating field {field_name}: {e}")
+                continue
+        
+        return has_changes, old_values, new_values
+
+    async def _apply_static_updates(self, customer, static_updates: list) -> tuple[bool, dict, dict]:
+        """应用静态更新（硬性配置的字段更新）"""
+        has_changes = False
+        old_values = {}
+        new_values = {}
+        
+        for update in static_updates:
+            if not update.get('enabled', True):
+                continue
+                
+            field_name = update.get('db_field')
+            field_value = update.get('value')
+            data_type = update.get('data_type', 'string')
+            
+            if not field_name or field_value is None:
+                continue
+            
+            # 解析变量
+            if isinstance(field_value, str):
+                field_value = await self._resolve_match_value(field_value)
+            
+            # 类型转换
+            try:
+                if data_type == 'number':
+                    field_value = float(field_value)
+                elif data_type == 'date':
+                    if isinstance(field_value, str):
+                        field_value = datetime.strptime(field_value, "%Y-%m-%d").date()
+                elif data_type == 'boolean':
+                    field_value = str(field_value).lower() in ['true', '1', 'yes']
+                elif data_type == 'current_timestamp':
+                    field_value = datetime.utcnow()
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Type conversion error for {field_name}: {e}")
+                continue
+            
+            # 记录旧值并应用新值
+            try:
+                if field_name.startswith('custom_fields.'):
+                    # 处理自定义字段
+                    custom_field_key = field_name.replace('custom_fields.', '')
+                    if customer.custom_fields is None:
+                        customer.custom_fields = {}
+                    
+                    old_values[field_name] = customer.custom_fields.get(custom_field_key)
+                    
+                    if customer.custom_fields.get(custom_field_key) != field_value:
+                        customer.custom_fields[custom_field_key] = field_value
+                        new_values[field_name] = field_value
                     has_changes = True
                     
-            elif col == "last_follow_up_time" and mode == "now":
-                customer.last_follow_up_time = datetime.utcnow()
-                new_values["last_follow_up_time"] = datetime.utcnow().isoformat()
+                elif hasattr(customer, field_name):
+                    # 处理基础字段
+                    current_value = getattr(customer, field_name)
+                    old_values[field_name] = current_value.isoformat() if hasattr(current_value, 'isoformat') else current_value
+                    
+                    if current_value != field_value:
+                        setattr(customer, field_name, field_value)
+                        new_values[field_name] = field_value.isoformat() if hasattr(field_value, 'isoformat') else field_value
                 has_changes = True
         
-        if has_changes:
-            # 更新版本号和时间戳
-            customer.version += 1
-            customer.updated_at = datetime.utcnow()
+            except Exception as e:
+                logger.error(f"Error applying static update for {field_name}: {e}")
+                continue
+        
+        return has_changes, old_values, new_values
+
+    async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """执行数据库更新"""
+        print(f"\n🔄 UpdateDB 节点开始执行...")
+        print(f"  节点配置: {node_config}")
+        
+        try:
+            # 获取配置
+            node_data = node_config.get("data", {})
+            update_mode = node_data.get("update_mode", "smart_update")
             
-            # 记录审计日志
-            audit_log = AuditLog(
-                entity_type="customer",
-                entity_id=customer.id,
-                action="update",
-                old_values=old_values,
-                new_values=new_values,
-                user_id=customer.user_id,
-                source="workflow"
-            )
-            self.db.add(audit_log)
+            # 安全选项
+            optimistic_lock = node_data.get("optimistic_lock", False)
+            skip_if_equal = node_data.get("skip_if_equal", True)
+            audit_log_enabled = node_data.get("audit_log", True)
+            error_strategy = node_data.get("error_strategy", "log_and_continue")
+            
+            print(f"  更新模式: {update_mode}")
+            print(f"  目标表: customers (固定)")
+            
+            # 🆕 智能匹配客户记录 - 根据触发器类型自动选择匹配方式
+            customer = None
+            trigger_data = self.context.get("trigger_data", {})
+            
+            # 首先尝试从上下文获取客户（MessageTrigger 已经设置）
+            customer = self.context.db.get("customer", None)
+            
+            if not customer:
+                # 根据触发器数据智能匹配
+                phone = trigger_data.get("phone")
+                chat_id = trigger_data.get("chat_id")
+                user_id = trigger_data.get("user_id")
+                
+                print(f"  触发器数据: phone={phone}, chat_id={chat_id}, user_id={user_id}")
+                
+                if phone and user_id:
+                    # WhatsApp 触发器 - 使用手机号匹配
+                    customer = self.db.query(Customer).filter(
+                        Customer.phone == phone,
+                        Customer.user_id == user_id
+                    ).first()
+                    print(f"  通过手机号匹配客户: {customer.name if customer else 'Not Found'}")
+                    
+                elif chat_id and user_id:
+                    # Telegram 触发器 - 使用聊天ID匹配
+                    customer = self.db.query(Customer).filter(
+                        Customer.telegram_chat_id == str(chat_id),
+                        Customer.user_id == user_id
+                    ).first()
+                    print(f"  通过聊天ID匹配客户: {customer.name if customer else 'Not Found'}")
+                    
+                elif user_id:
+                    # 其他触发器 - 尝试通过用户ID获取最近的客户
+                    customer = self.db.query(Customer).filter(
+                        Customer.user_id == user_id
+                    ).order_by(Customer.updated_at.desc()).first()
+                    print(f"  通过用户ID匹配最近客户: {customer.name if customer else 'Not Found'}")
+            
+            if not customer:
+                if error_strategy == "abort_on_error":
+                    raise ValueError("Customer not found")
+                else:
+                    print(f"  ⚠️ 客户未找到，跳过更新")
+                    return {"db.update_result": "customer_not_found"}
+            
+            print(f"  找到客户: {customer.name} (ID: {customer.id})")
+            
+            # 乐观锁检查
+            if optimistic_lock and hasattr(customer, 'version'):
+                current_version = customer.version
+                print(f"  当前版本: {current_version}")
+            
+            # 收集所有更新
+            total_has_changes = False
+            total_old_values = {}
+            total_new_values = {}
+            
+            # 智能更新（AI 输出）
+            if update_mode in ["smart_update", "hybrid"]:
+                # 从 context.ai 中获取分析结果
+                ai_analyze = self.context.ai.get("analyze", {})
+                ai_updates = ai_analyze.get("updates", {})
+                
+                if ai_updates:
+                    print(f"  🤖 应用 AI 更新: {ai_updates}")
+                    smart_changes, smart_old, smart_new = await self._apply_smart_updates(customer, ai_updates)
+                    if smart_changes:
+                        total_has_changes = True
+                        total_old_values.update(smart_old)
+                        total_new_values.update(smart_new)
+            
+            # 静态更新（硬性配置）
+            if update_mode in ["static_update", "hybrid"]:
+                static_updates = node_data.get("static_updates", [])
+                
+                if static_updates:
+                    print(f"  ⚙️ 应用静态更新: {len(static_updates)} 个字段")
+                    static_changes, static_old, static_new = await self._apply_static_updates(customer, static_updates)
+                    if static_changes:
+                        total_has_changes = True
+                        total_old_values.update(static_old)
+                        total_new_values.update(static_new)
+            
+            # 如果没有变更且设置了跳过相同值
+            if not total_has_changes and skip_if_equal:
+                print(f"  ✅ 无变更，跳过更新")
+                return {
+                    "db.update_result": "no_changes",
+                    "db.updated_row": customer,
+                    "ctx.versions.db": getattr(customer, 'version', 1)
+                }
+            
+            # 提交变更
+            if total_has_changes:
+                # 更新版本号和时间戳
+                if hasattr(customer, 'version'):
+                    customer.version += 1
+                customer.updated_at = datetime.utcnow()
+                self.db.add(customer) # 显式标记 customer 对象变更，确保 custom_fields 变化被跟踪
+                
+                # 记录审计日志
+                if audit_log_enabled:
+                    audit_log = AuditLog(
+                        entity_type="customer",
+                        entity_id=customer.id,
+                        action="update",
+                        old_values=total_old_values,
+                        new_values=total_new_values,
+                        user_id=customer.user_id,
+                        source="workflow"
+                    )
+                    self.db.add(audit_log)
             
             self.db.commit()
+            print(f"  ✅ 数据库事务已提交。")
             self.db.refresh(customer)
-        
-        return {
-            "db.updated_row": customer,
-            "ctx.versions.db": customer.version
-        }
+            print(f"  ✅ 客户对象已从数据库刷新。最新 custom_fields: {customer.custom_fields}")
+            
+            print(f"  ✅ 更新完成，新版本: {getattr(customer, 'version', 1)}")
+            
+            return {
+                "db.update_result": "success",
+                "db.updated_row": customer,
+                "db.changes_applied": total_new_values,
+                "ctx.versions.db": getattr(customer, 'version', 1)
+            }
+            
+        except Exception as e:
+            error_msg = f"UpdateDB execution failed: {e}"
+            logger.error(error_msg)
+            
+            # Get error_strategy from node_data, with default fallback
+            node_data = node_config.get("data", {})
+            error_strategy = node_data.get("error_strategy", "log_and_continue")
+            
+            if error_strategy == "abort_on_error":
+                raise
+            elif error_strategy == "rollback_on_error":
+                self.db.rollback()
+                raise
+            else:  # log_and_continue
+                return {
+                    "db.update_result": "error",
+                    "db.error_message": str(e)
+                }
 
 class DelayProcessor(NodeProcessor):
     """延迟节点 - 控制工作时段和限频"""
@@ -924,7 +1696,22 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
             return []
     
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
-        """发送 WhatsApp 消息"""
+        """发送 WhatsApp 消息 - 支持动态路由到 Telegram"""
+        
+        # 检查是否为 Telegram 触发，如果是则转发给 SendTelegramMessageProcessor
+        trigger_data = self.context.get("trigger_data", {})
+        trigger_channel = trigger_data.get("channel", "whatsapp")
+        
+        if trigger_channel == "telegram":
+            logger.info(f"📤 检测到 Telegram 触发，转发给 SendTelegramMessageProcessor")
+            processor = SendTelegramMessageProcessor(self.db, self.context)
+            # 确保 Telegram 节点配置正确 - 强制使用触发器的 chat_id
+            node_data = node_config.get("data", {})
+            node_data["send_mode"] = "trigger_number"  # 强制使用触发器的 chat_id，覆盖任何现有配置
+            logger.info(f"📤 强制设置 send_mode 为 trigger_number，使用触发器 chat_id: {trigger_data.get('chat_id')}")
+            return await processor.execute(node_config)
+        
+        # 否则继续 WhatsApp 处理逻辑
         # 🔧 修復：從 data 字段獲取配置，與其他節點保持一致
         node_data = node_config.get("data", {})
         
@@ -936,35 +1723,107 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
         print(f"📤 SendWhatsApp 節點開始執行:")
         print(f"  初始配置 - to: '{to}', message: '{message}'")
         print(f"  node_data keys: {list(node_data.keys())}")
+        
+        # Debug: 检查上下文中的触发数据和客户数据
+        trigger_data = self.context.get("trigger_data", {})
+        customer = self.context.db.get("customer", None)
+        print(f"  🔍 调试信息:")
+        print(f"    trigger_data: {trigger_data}")
+        print(f"    customer: {customer}")
+        if customer:
+            print(f"    customer.phone: {getattr(customer, 'phone', 'N/A')}")
         # print(f"  context keys: {list(self.context.__dict__.keys())}") # Remove verbose context keys print
         
         # 解析变量和自动填充 'to' 字段
-        send_mode = node_data.get("send_mode", "trigger_number")
+        send_mode = node_data.get("send_mode", "smart_reply")
+        number_source = node_data.get("number_source", "trigger_number")
         
-        if send_mode == "specified_number":
-            to = node_data.get("to_number", "")
-            print(f"  使用指定号码发送: {to}")
-        elif send_mode == "trigger_number":
-            customer = self.context.db.get("customer")
-            if customer:
-                to = customer.phone
-                print(f"  使用触发号码发送 (自动填充): {to}")
+        print(f"  发送模式: {send_mode}, 号码来源: {number_source}")
+        
+        if send_mode == "smart_reply":
+            # 智能回复：根据触发器类型自动选择平台和标识符
+            trigger_data = self.context.get("trigger_data", {})
+            trigger_channel = trigger_data.get("channel", "")
+            
+            if trigger_channel == "whatsapp":
+                to = trigger_data.get("phone", "")
+                print(f"  智能回复 - WhatsApp: {to}")
+            elif trigger_channel == "telegram":
+                to = trigger_data.get("chat_id", "")
+                print(f"  智能回复 - Telegram: {to}")
             else:
-                print(f"  ❌ 找不到客户信息，无法自动填充收件人")
-        else:
-            # 回退到其他情况，例如如果 `to` 字段包含变量
-            if not to or "{db.phone}" in to or "{trigger_ai.output.phone}" in to: # Add trigger_ai.output.phone to check
-                customer = self.context.db.get("customer")
+                # 回退到客户信息
+                customer = self.context.db.get("customer", None)
                 if customer:
-                    if not to:
-                        to = customer.phone
-                        print(f"  自動填充收件人: {to}")
-                    else:
-                        # Apply generic variable parsing for 'to' field
-                        to = self._resolve_variable_from_context(to)
-                        print(f"  替換變量收件人: {to}")
+                    to = customer.phone
+                    print(f"  智能回复 - 回退到客户号码: {to}")
                 else:
-                    print(f"  ❌ 找不到客戶信息，無法填充收件人")
+                    print(f"  ❌ 智能回复失败，找不到客户信息")
+                    
+        elif send_mode == "force_whatsapp":
+            # 强制发送到 WhatsApp
+            if number_source == "custom_number":
+                to = node_data.get("to_number", "")
+                print(f"  强制 WhatsApp - 自定义号码: {to}")
+            else:  # trigger_number
+                trigger_data = self.context.get("trigger_data", {})
+                to = trigger_data.get("phone", "")
+                if not to:
+                    customer = self.context.db.get("customer", None)
+                    if customer:
+                        to = customer.phone
+                print(f"  强制 WhatsApp - 触发号码: {to}")
+                
+        elif send_mode == "force_telegram":
+            # 强制发送到 Telegram
+            if number_source == "custom_number":
+                to = node_data.get("telegram_chat_id", "")
+                print(f"  强制 Telegram - 自定义 Chat ID: {to}")
+            else:  # trigger_number
+                trigger_data = self.context.get("trigger_data", {})
+                to = trigger_data.get("chat_id", "")
+                if not to:
+                    customer = self.context.db.get("customer", None)
+                    if customer and hasattr(customer, 'telegram_chat_id'):
+                        to = customer.telegram_chat_id
+                print(f"  强制 Telegram - 触发 Chat ID: {to}")
+                
+        else:
+            # 兼容旧的配置方式
+            if send_mode == "specified_number":
+                to = node_data.get("to_number", "")
+                print(f"  兼容模式 - 指定号码: {to}")
+                
+                # 如果指定号码为空，回退到触发号码
+                if not to:
+                    trigger_data = self.context.get("trigger_data", {})
+                    to = trigger_data.get("phone", "")
+                    if not to:
+                        customer = self.context.db.get("customer", None)
+                        if customer:
+                            to = customer.phone
+                    print(f"  兼容模式 - 指定号码为空，回退到: {to}")
+                    
+            elif send_mode == "trigger_number":
+                customer = self.context.db.get("customer", None)
+                if customer:
+                    to = customer.phone
+                    print(f"  兼容模式 - 触发号码: {to}")
+                else:
+                    print(f"  ❌ 兼容模式失败，找不到客户信息")
+            else:
+                # 回退到变量解析
+                if not to or "{db.phone}" in to or "{trigger_ai.output.phone}" in to:
+                    customer = self.context.db.get("customer", None)
+                    if customer:
+                        if not to:
+                            to = customer.phone
+                            print(f"  自動填充收件人: {to}")
+                        else:
+                            to = self._resolve_variable_from_context(to)
+                            print(f"  替換變量收件人: {to}")
+                    else:
+                        print(f"  ❌ 找不到客戶信息，無法填充收件人")
         
         # 🔧 修復：改善 AI 回復文本的讀取邏輯
         # 统一使用新的变量解析函数来处理 message 字段
@@ -1033,7 +1892,7 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                 print(f"  嘗試 {attempt + 1}/{retries.get('max', 1)}")
                 
                 # 獲取用戶ID用於身份驗證
-                customer = self.context.db.get("customer")
+                customer = self.context.db.get("customer", None)
                 trigger = self.context.get("trigger_data", {})
                 # 优先使用 customer.user_id，没有则回退到 trigger 中的 user_id
                 user_id = customer.user_id if customer else trigger.get("user_id")
@@ -1139,7 +1998,7 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                 print(f"  ✅ 最终发送结果: {result}")
                 
                 # 记录消息到数据库
-                customer = self.context.db.get("customer")
+                customer = self.context.db.get("customer", None)
                 if customer:
                     msg = Message(
                         content=message,
@@ -1244,18 +2103,18 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
 
             # 3. 尝试 'db.customer' 相关变量或 'customer.all'
             if var_path.startswith("db.customer."):
-                customer_obj = self.context.db.get("customer")
+                customer_obj = self.context.db.get("customer", None)
                 if customer_obj:
                     value = get_nested_value(customer_obj, var_path.split('.')[2:])
                     if value is not None:
                         print(f"    - Resolved from db.customer: {var_path} -> {value}")
                         return str(value)
             elif var_path == "customer.all":
-                customer_obj = self.context.db.get("customer")
+                customer_obj = self.context.db.get("customer", None)
                 if customer_obj:
                     # 将整个客户对象（包括 custom_fields）转换为 JSON 字符串
                     customer_data = customer_obj.__dict__.copy()
-                    customer_data.pop('_s-instance_state', None)
+                    customer_data.pop('_sa_instance_state', None)
                     
                     # 如果 custom_fields 是字符串，尝试解析为字典
                     if isinstance(customer_data.get('custom_fields'), str):
@@ -1311,13 +2170,39 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     print(f"    - Resolved from ai.reply: {var_path} -> {value}")
                     return str(value)
 
-            # 6. 尝试通用变量 (self.context.variables)
+            # 6. 尝试 'customer' 相关变量（兼容格式）
+            if var_path.startswith("customer."):
+                customer_obj = self.context.db.get("customer", None)
+                if customer_obj:
+                    field_name = var_path.replace("customer.", "")
+                    
+                    # 特殊处理一些常见的字段映射
+                    if field_name == "last_message":
+                        # 获取最后一条消息内容
+                        trigger_data = self.context.get("trigger_data", {})
+                        value = trigger_data.get("message")
+                        if value is not None:
+                            print(f"    - Resolved from customer.last_message (trigger): {var_path} -> {value}")
+                            return str(value)
+                        else:
+                            print(f"    - customer.last_message not found in trigger")
+                    elif hasattr(customer_obj, field_name):
+                        value = getattr(customer_obj, field_name)
+                        if value is not None:
+                            print(f"    - Resolved from customer: {var_path} -> {value}")
+                            return str(value)
+                    else:
+                        print(f"    - customer object has no field: {field_name}")
+                else:
+                    print(f"    - No customer object in context")
+
+            # 7. 尝试通用变量 (self.context.variables)
             if var_path in self.context.variables:
                 value = self.context.variables[var_path]
                 print(f"    - Resolved from context.variables: {var_path} -> {value}")
                 return str(value)
             
-            # 7. 尝试解析特定节点输出变量，例如 AI_NODE_ID.output.reply_text
+            # 8. 尝试解析特定节点输出变量，例如 AI_NODE_ID.output.reply_text
             parts = var_path.split('.')
             if len(parts) >= 2:
                 node_id = parts[0]
@@ -1451,7 +2336,7 @@ class TemplateProcessor(NodeProcessor):
             field_name = parts[1]
             
             if table_name == "customer":
-                customer = self.context.db.get("customer")
+                customer = self.context.db.get("customer", None)
                 if customer and hasattr(customer, field_name):
                     value = getattr(customer, field_name)
                     return str(value) if value is not None else ""
@@ -1522,89 +2407,543 @@ class SendTelegramMessageProcessor(NodeProcessor):
         super().__init__(db, context)
         self.telegram_service = TelegramService()
     
+    async def _get_media_urls_from_identifiers(self, media_uuids: List[str], folder_names: List[str], user_id: int) -> List[str]:
+        """
+        根据媒体UUID和文件夹名称获取媒体文件URL
+        
+        Args:
+            media_uuids: 媒体文件UUID列表
+            folder_names: 文件夹名称列表
+            user_id: 用户ID
+            
+        Returns:
+            List[str]: 媒体文件URL列表
+        """
+        try:
+            from app.db.models import MediaFile
+            from app.services import supabase as supabase_service
+            from app.core.config import settings
+            
+            media_urls = []
+            
+            # 获取单个媒体文件
+            if media_uuids:
+                media_files = self.db.query(MediaFile).filter(
+                    MediaFile.id.in_(media_uuids),
+                    MediaFile.user_id == user_id
+                ).all()
+                
+                for media_file in media_files:
+                    # 生成签名URL
+                    relative_path = media_file.filepath.replace(f"{settings.SUPABASE_BUCKET}/", "", 1)
+                    signed_url = await supabase_service.get_signed_url_for_file(relative_path)
+                    if signed_url:
+                        media_urls.append(signed_url)
+                        print(f"    📎 添加 Telegram 媒体文件: {media_file.filename}")
+            
+            # 获取文件夹中的所有媒体文件
+            if folder_names:
+                for folder_name in folder_names:
+                    folder_media = self.db.query(MediaFile).filter(
+                        MediaFile.user_id == user_id,
+                        MediaFile.folder == folder_name,
+                        MediaFile.filename != ".keep"  # 排除.keep文件
+                    ).all()
+                    
+                    for media_file in folder_media:
+                        relative_path = media_file.filepath.replace(f"{settings.SUPABASE_BUCKET}/", "", 1)
+                        signed_url = await supabase_service.get_signed_url_for_file(relative_path)
+                        if signed_url:
+                            media_urls.append(signed_url)
+                            print(f"    📁 添加 Telegram 文件夹媒体: {folder_name}/{media_file.filename}")
+            
+            return media_urls
+            
+        except Exception as e:
+            logger.error(f"Failed to get media URLs from identifiers for Telegram: {e}")
+            return []
+    
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         """发送 Telegram 消息"""
         node_data = node_config.get("data", {})
         
-        send_mode = node_data.get("send_mode", "trigger_number")
+        send_mode = node_data.get("send_mode", "smart_reply")
+        number_source = node_data.get("number_source", "trigger_number")
         to = ""
-        bot_token = node_data.get("bot_token")
-        chat_id = node_data.get("chat_id") # For telegram_chat_id mode
-        message = node_data.get("message", "") or node_config.get("message", "")
+        bot_token = node_data.get("telegram_bot_token") # 从 node_data 获取 bot_token
+        message_template = node_data.get("template") # 从 node_data 获取模板
         
         print(f"📤 SendTelegram 節點開始執行:")
-        print(f"  初始配置 - send_mode: '{send_mode}', message: '{message}'")
+        print(f"  初始配置 - send_mode: '{send_mode}', number_source: '{number_source}', message_template: '{message_template}'")
         
-        if send_mode == "specified_number":
-            to = node_data.get("to_number", "") # 这里实际上是 chat_id
-            print(f"  使用指定号码发送 (Telegram Chat ID): {to}")
-        elif send_mode == "telegram_chat_id":
-            to = chat_id # 直接使用配置中的 chat_id
-            print(f"  使用 Telegram Chat ID 发送: {to}")
-        elif send_mode == "trigger_number":
-            # 对于 Telegram，触发号码可能不是直接的 chat_id，需要额外逻辑或映射
-            # 暂时假设 trigger_data.phone 可以作为 chat_id，但这可能不准确
+        # 确定接收方 (to)
+        if send_mode == "smart_reply":
+            # 智能回复：使用触发器的 chat_id
             trigger_data = self.context.get("trigger_data", {})
-            to = trigger_data.get("phone", "") # 假设触发器的 phone 可以作为 chat_id
-            print(f"  使用触发号码发送 (假设为 Chat ID): {to}")
+            to = trigger_data.get("chat_id", "")
+            print(f"  智能回复 - 使用触发器 Chat ID: {to}")
+        elif send_mode == "force_telegram":
+            # 强制发送到 Telegram
+            if number_source == "custom_number":
+                to = node_data.get("telegram_chat_id", "")
+                print(f"  强制 Telegram - 自定义 Chat ID: {to}")
+            else:  # trigger_number
+                trigger_data = self.context.get("trigger_data", {})
+                to = trigger_data.get("chat_id", "")
+                print(f"  强制 Telegram - 触发器 Chat ID: {to}")
+        elif send_mode == "telegram_chat_id":
+            # 兼容旧的配置方式
+            to = node_data.get("telegram_chat_id", "")
+            print(f"  兼容模式 - 使用指定 Chat ID: {to}")
+        elif send_mode == "trigger_number":
+            # 兼容旧的配置方式
+            trigger_data = self.context.get("trigger_data", {})
+            to = trigger_data.get("chat_id", trigger_data.get("phone", "")) # 优先使用 chat_id，其次 phone
+            print(f"  兼容模式 - 使用触发器 Chat ID/Phone: {to}")
+        else:
+            # 如果 send_mode 未知或为空，默认为智能回复
+            trigger_data = self.context.get("trigger_data", {})
+            to = trigger_data.get("chat_id", trigger_data.get("phone", ""))
+            print(f"  未知模式，默认使用触发器 (Chat ID/Phone): {to}")
+
+        # 解析消息内容
+        message_to_send = ""
         
-        # 解析消息变量
-        if not message or "{ai.reply.reply_text}" in message:
-            message_content = self.context.get("message_content", "")
-            ai_reply_text = self.context.get("ai.reply.reply_text", "")
+        # 优先使用节点配置中的模板
+        if message_template:
+            message_to_send = self._resolve_variable_from_context(message_template)
+            print(f"  ✅ 使用节点模板消息: '{message_to_send}'")
+        
+        # 如果节点模板为空，尝试从上下文中获取消息内容（模板处理器或其他处理器的输出）
+        if not message_to_send:
+            # 调试：打印完整的上下文信息
+            print(f"  🔍 调试上下文信息:")
+            print(f"    - 完整上下文键: {list(self.context.variables.keys())}")
             
-            ai_reply_obj = self.context.get("ai.reply", {})
-            if isinstance(ai_reply_obj, dict):
-                ai_reply_text = ai_reply_obj.get("reply_text", ai_reply_text)
+            # 1. 优先从模板处理器输出获取 (message_content)
+            template_message = self.context.variables.get("message_content")
+            if template_message:
+                message_to_send = template_message
+                print(f"  ✅ 使用模板处理器输出: '{message_to_send}'")
             
-            if not message:
-                if ai_reply_text:
-                    message = ai_reply_text
-                elif message_content:
-                    message = message_content
+            # 2. 如果没有模板输出，尝试从 AI 回复中获取
+            if not message_to_send:
+                ai_data = self.context.variables.get("ai")
+                print(f"    - ai 对象: {ai_data}")
+                print(f"    - ai 对象类型: {type(ai_data)}")
+                
+                if ai_data and isinstance(ai_data, dict):
+                    reply_obj = ai_data.get("reply")
+                    print(f"    - ai.reply 对象: {reply_obj}")
+                    print(f"    - ai.reply 类型: {type(reply_obj)}")
+                    
+                    if reply_obj and isinstance(reply_obj, dict):
+                        message_to_send = reply_obj.get("reply_text")
+                        print(f"  ✅ 使用 AI 回复: '{message_to_send}'")
+                
+                # 备用方法：尝试直接从 context.ai 获取（如果 variables 复制失败）
+                if not message_to_send and hasattr(self.context, 'ai'):
+                    reply_obj = self.context.ai.get("reply", {})
+                    print(f"    - 备用：从 context.ai.reply 获取: {reply_obj}")
+                    if reply_obj and isinstance(reply_obj, dict):
+                        message_to_send = reply_obj.get("reply_text")
+                        print(f"  ✅ 备用方式使用 AI 回复: '{message_to_send}'")
+            
+            # 3. 最终fallback，使用默认消息
+            if not message_to_send:
+                message_to_send = self.context.get("chat.last_message", "Hi! We received your message.")
+                print(f"  ⚠️ 使用默认消息 (无其他消息源): '{message_to_send}'")
+
+        print(f"  最终接收方 (to): '{to}'")
+        print(f"  最终消息内容: '{message_to_send}'")
+
+        if not to:
+            raise ValueError("Recipient (chat_id) for Telegram message is empty.")
+
+        # 获取用户专属的 API ID 和 API Hash
+        settings_service = SettingsService(self.db)
+        customer = self.context.db.get("customer", None)
+        if not customer:
+            raise ValueError("Customer not found in context, cannot retrieve Telegram API credentials.")
+        user_id = customer.user_id # 从客户中获取 user_id
+
+        # 处理媒体文件 - 从节点配置和 AI 回复中获取
+        media_uuids = node_data.get("media_uuids", [])
+        folder_names = node_data.get("folder_names", [])
+        
+        # 从 AI 回复中获取媒体文件和媒体设置
+        ai_data = self.context.variables.get("ai")
+        media_settings = {}
+        if ai_data and isinstance(ai_data, dict):
+            ai_reply = ai_data.get("reply", {})
+            if ai_reply and isinstance(ai_reply, dict):
+                ai_media_uuids = ai_reply.get("media_uuids", [])
+                ai_folder_names = ai_reply.get("folder_names", [])
+                media_settings = ai_reply.get("media_settings", {})
+                
+                # 合并 AI 回复中的媒体文件
+                media_uuids.extend(ai_media_uuids)
+                folder_names.extend(ai_folder_names)
+                
+                if ai_media_uuids or ai_folder_names:
+                    print(f"  🤖 从 AI 回复获取媒体 - UUIDs: {len(ai_media_uuids)}, 文件夹: {len(ai_folder_names)}")
+        
+        media_urls = []
+        if media_uuids or folder_names:
+            print(f"  📎 总媒体配置 - UUIDs: {len(media_uuids)}, 文件夹: {len(folder_names)}")
+            media_urls = await self._get_media_urls_from_identifiers(media_uuids, folder_names, user_id)
+            print(f"  📎 获取到 {len(media_urls)} 个媒体文件")
+
+        print(f"  媒体文件数量: {len(media_urls)}")
+        print(f"  媒体设置: {media_settings}")
+
+        if not message_to_send and not media_urls:
+            raise ValueError("Message content and media files for Telegram message are both empty.")
+        api_id = settings_service.get_setting_for_user('telegram_api_id', user_id)
+        api_hash = settings_service.get_setting_for_user('telegram_api_hash', user_id)
+
+        if not api_id or not api_hash:
+            raise HTTPException(status_code=400, detail="Telegram API credentials not configured for user.")
+
+        api_id = int(api_id)
+
+        # 检查是否提供了 bot_token
+        if bot_token:
+            # 如果提供了 bot_token，使用 Bot 模式发送
+            print(f"  使用 Telegram Bot 发送消息到 {to}")
+            try:
+                async with TelegramClient(StringSession(), api_id, api_hash) as bot_client:
+                    # Bot 客户端也需要 connect
+                    await _ensure_client_connect(bot_client)
+                    await bot_client.start(bot_token=bot_token)
+                    
+                    # 处理 chat_id 转换
+                    try:
+                        # 尝试将 chat_id 转换为整数
+                        chat_id_int = int(to)
+                        entity = chat_id_int  # 直接使用整数 chat_id
+                        print(f"  Bot 模式使用整数 chat_id: {entity}")
+                    except ValueError:
+                        # 如果不是数字，尝试作为用户名或实体获取
+                        entity = await bot_client.get_entity(to)
+                        print(f"  Bot 模式通过 get_entity 获取实体: {entity}")
+                    
+                    # 发送消息和媒体文件
+                    if media_urls:
+                        send_separately = media_settings.get("send_media_separately", False)
+                        send_with_caption = media_settings.get("send_with_caption", True)
+                        delay_between_media = media_settings.get("delay_between_media", False)
+                        delay_seconds = media_settings.get("delay_seconds", 2)
+                        
+                        if send_separately:
+                            # 分开发送：先发送媒体，再发送文本
+                            print(f"  🖼️ Telegram Bot 分开发送模式：先发送所有媒体文件")
+                            
+                            # 先发送每个媒体文件
+                            for i, media_url in enumerate(media_urls):
+                                if delay_between_media and i > 0:
+                                    print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                    await asyncio.sleep(delay_seconds)
+                                
+                                print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                                await bot_client.send_message(entity=entity, message="", file=media_url)
+                            
+                            # 所有媒体发送完成后，再发送文本消息
+                            if message_to_send:
+                                print(f"  📝 媒体发送完成，现在发送文本消息")
+                                await bot_client.send_message(entity=entity, message=message_to_send)
+                        else:
+                            # 一起发送模式
+                            if len(media_urls) == 1 and message_to_send and send_with_caption:
+                                # 单个媒体文件，带文本
+                                print(f"  📤 发送带文本的单个媒体文件")
+                                await bot_client.send_message(entity=entity, message=message_to_send, file=media_urls[0])
+                            else:
+                                # 多个媒体文件或只有媒体文件
+                                if message_to_send:
+                                    print(f"  📝 先发送文本消息")
+                                    await bot_client.send_message(entity=entity, message=message_to_send)
+                                
+                                for i, media_url in enumerate(media_urls):
+                                    if delay_between_media and i > 0:
+                                        print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                        await asyncio.sleep(delay_seconds)
+                                    
+                                    print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                                    await bot_client.send_message(entity=entity, message="", file=media_url)
+                    else:
+                        # 只发送文本消息
+                        await bot_client.send_message(entity=entity, message=message_to_send)
+                    
+                    print(f"✅ Telegram Bot 消息发送成功到 {to}")
+            except Exception as e:
+                logger.error(f"❌ Telegram Bot 消息发送失败到 {to}: {e}")
+                raise
+        else:
+            # 否则，使用用户会话模式发送
+            # 获取用户的 string_session 或 session_file_b64
+            string_sess = settings_service.get_setting_for_user('telegram_string_session', user_id)
+            session_file_b64 = settings_service.get_setting_for_user('telegram_session_file', user_id)
+
+            session_param: Any = None
+            temp_session_file_path: Optional[str] = None
+
+            if string_sess:
+                session_param = StringSession(string_sess)
+                print(f"  使用 StringSession 发送消息...")
+            elif session_file_b64:
+                try:
+                    # 更健壮的 base64 解码
+                    cleaned_session_file = session_file_b64.strip().replace(' ', '')
+                    padding_needed = -len(cleaned_session_file) % 4
+                    if padding_needed != 0: # 仅在需要时添加填充
+                        cleaned_session_file += '=' * padding_needed
+
+                    data = base64.b64decode(cleaned_session_file, validate=True)
+                    temp_session_file = tempfile.NamedTemporaryFile(delete=False, suffix=".session")
+                    temp_session_file.write(data)
+                    temp_session_file.close()
+                    temp_session_file_path = temp_session_file.name
+                    session_param = temp_session_file_path
+                    print(f"  使用临时 session 文件 '{temp_session_file_path}' 发送消息...")
+                except Exception as e:
+                    logger.error(f"❌ 解码或写入临时会话文件失败: {e}")
+                    # 如果会话文件损坏，清除它
+                    settings_service.delete_setting_for_user('telegram_session_file', user_id)
+                    raise HTTPException(status_code=500, detail="Invalid Telegram session file, please re-login.")
+
+            if not session_param:
+                raise HTTPException(status_code=400, detail="Telegram session not found. Please log in to Telegram.")
+
+            client: Optional[TelegramClient] = None
+            try:
+                client = TelegramClient(session_param, api_id, api_hash)
+                await _ensure_client_connect(client)
+                
+                # 获取目标实体 - 处理 chat_id 转换
+                try:
+                    # 尝试将 chat_id 转换为整数
+                    chat_id_int = int(to)
+                    entity = chat_id_int  # 直接使用整数 chat_id
+                    print(f"  使用整数 chat_id: {entity}")
+                except ValueError:
+                    # 如果不是数字，尝试作为用户名或实体获取
+                    entity = await client.get_entity(to)
+                    print(f"  通过 get_entity 获取实体: {entity}")
+
+                # 发送消息和媒体文件
+                if media_urls:
+                    send_separately = media_settings.get("send_media_separately", False)
+                    send_with_caption = media_settings.get("send_with_caption", True)
+                    delay_between_media = media_settings.get("delay_between_media", False)
+                    delay_seconds = media_settings.get("delay_seconds", 2)
+                    
+                    if send_separately:
+                        # 分开发送：先发送媒体，再发送文本
+                        print(f"  🖼️ Telegram 用户会话分开发送模式：先发送所有媒体文件")
+                        
+                        # 先发送每个媒体文件
+                        for i, media_url in enumerate(media_urls):
+                            if delay_between_media and i > 0:
+                                print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                await asyncio.sleep(delay_seconds)
+                            
+                            print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                            await client.send_message(entity=entity, message="", file=media_url)
+                        
+                        # 所有媒体发送完成后，再发送文本消息
+                        if message_to_send:
+                            print(f"  📝 媒体发送完成，现在发送文本消息")
+                            await client.send_message(entity=entity, message=message_to_send)
+                    else:
+                        # 一起发送模式
+                        if len(media_urls) == 1 and message_to_send and send_with_caption:
+                            # 单个媒体文件，带文本
+                            print(f"  📤 发送带文本的单个媒体文件")
+                            await client.send_message(entity=entity, message=message_to_send, file=media_urls[0])
+                        else:
+                            # 多个媒体文件或只有媒体文件
+                            if message_to_send:
+                                print(f"  📝 先发送文本消息")
+                                await client.send_message(entity=entity, message=message_to_send)
+                            
+                            for i, media_url in enumerate(media_urls):
+                                if delay_between_media and i > 0:
+                                    print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                    await asyncio.sleep(delay_seconds)
+                                
+                                print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                                await client.send_message(entity=entity, message="", file=media_url)
                 else:
-                    message = "Hi! We received your message."
-            else:
-                if ai_reply_text:
-                    message = message.replace("{ai.reply.reply_text}", ai_reply_text)
-        
-        print(f"  最終參數 - to: '{to}', message: '{message}', bot_token: '{bot_token[:5]}...'")
-        
-        if not to or not bot_token:
-            raise ValueError("Missing recipient (chat_id) or bot_token for Telegram message")
-        
-        # 獲取用戶ID用於身份驗證 (如果通过用户会话发送)
-        customer = self.context.db.get("customer")
-        trigger = self.context.get("trigger_data", {})
-        user_id = customer.user_id if customer else trigger.get("user_id")
-        
-        # 发送消息
-        print(f"🚀 開始發送 Telegram 消息...")
-        try:
-            result = await self.telegram_service.send_message(chat_id=to, message=message, user_id=user_id, bot_token=bot_token)
-            print(f"  ✅ 發送結果: {result}")
+                    # 只发送文本消息
+                    await client.send_message(entity=entity, message=message_to_send)
+                
+                print(f"✅ Telegram 用户会话消息发送成功到 {to}")
+            except Exception as e:
+                logger.error(f"❌ Telegram 用户会话消息发送失败到 {to}: {e}", exc_info=True)
+                raise
+            finally:
+                if client and client.is_connected():
+                    await client.disconnect()
+                if temp_session_file_path and os.path.exists(temp_session_file_path):
+                    os.remove(temp_session_file_path)
+                    print(f"  清理临时会话文件: {temp_session_file_path}")
+
+        return {
+            "status": "success",
+            "message": "Telegram message sent successfully",
+            "to": to,
+            "content": message_to_send
+        }
+
+    def _resolve_variable_from_context(self, text: str) -> str:
+        """解析文本中的所有 {{variable_path}} 和 {variable_path} 变量"""
+        if not isinstance(text, str): # Ensure text is a string
+            return str(text)
+
+        def get_nested_value(data, path_parts):
+            current = data
+            for part in path_parts:
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                elif isinstance(current, object) and hasattr(current, part):
+                    current = getattr(current, part)
+                else:
+                    return None
+            return current
+
+        def replace_match(match):
+            var_path = match.group(1).strip() # Extract path inside {{}} or {}
+            print(f"  🔍 Resolving variable path: {var_path}") # Debug print
+
+            # 尝试从各种上下文中解析变量
+            # 优先级：trigger_data, actor, db.customer, ai.reply, 通用变量, 其他节点输出
+
+            # 1. 优先尝试 'trigger' 相关变量
+            if var_path.startswith("trigger."):
+                trigger_data = self.context.get("trigger_data", {})
+                value = get_nested_value(trigger_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"    - Resolved from trigger: {var_path} -> {value}")
+                    return str(value)
+
+            # 2. 尝试 'actor' 相关变量
+            if var_path.startswith("actor."):
+                actor_data = self.context.get("actor", {})
+                value = get_nested_value(actor_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"    - Resolved from actor: {var_path} -> {value}")
+                    return str(value)
+
+            # 3. 尝试 'db.customer' 相关变量或 'customer.all'
+            if var_path.startswith("db.customer."):
+                customer_obj = self.context.db.get("customer", None)
+                if customer_obj:
+                    value = get_nested_value(customer_obj, var_path.split('.')[2:])
+                    if value is not None:
+                        print(f"    - Resolved from db.customer: {var_path} -> {value}")
+                        return str(value)
+            elif var_path == "customer.all":
+                customer_obj = self.context.db.get("customer", None)
+                if customer_obj:
+                    # 将整个客户对象（包括 custom_fields）转换为 JSON 字符串
+                    customer_data = customer_obj.__dict__.copy()
+                    customer_data.pop('_sa_instance_state', None)
+                    
+                    # 如果 custom_fields 是字符串，尝试解析为字典
+                    if isinstance(customer_data.get('custom_fields'), str):
+                        try:
+                            customer_data['custom_fields'] = json.loads(customer_data['custom_fields'])
+                        except json.JSONDecodeError:
+                            pass # 保持原样，如果不是有效 JSON
+
+                    return json.dumps(customer_data, ensure_ascii=False, indent=2)
+                return "{}"
+
+            # 4. 尝试 'custom_object' 相关变量
+            custom_object_match_field = re.match(r"custom_object\.(\d+)\.(\d+)\.([a-zA-Z0-9_.]+)", var_path)
+            custom_object_match_all = re.match(r"custom_object\.(\d+)\.all", var_path)
+
+            if custom_object_match_field:
+                entity_type_id = int(custom_object_match_field.group(1))
+                record_id = int(custom_object_match_field.group(2))
+                field_key = custom_object_match_field.group(3)
+                
+                record_obj = self.db.query(CustomEntityRecord).filter(
+                    CustomEntityRecord.entity_type_id == entity_type_id,
+                    CustomEntityRecord.id == record_id
+                ).first()
+
+                if record_obj and record_obj.data and field_key in record_obj.data:
+                    value = get_nested_value(record_obj.data, field_key.split('.'))
+                    if value is not None:
+                        print(f"    - Resolved from custom_object field: {var_path} -> {value}")
+                        return str(value)
+            elif custom_object_match_all:
+                entity_type_id = int(custom_object_match_all.group(1))
+                # 从上下文中获取选中的记录ID，如果存在的话
+                selected_record_id = self.context.get(f"selectedCustomEntityRecordId_{entity_type_id}")
+                
+                if selected_record_id:
+                    record_obj = self.db.query(CustomEntityRecord).filter(
+                        CustomEntityRecord.entity_type_id == entity_type_id,
+                        CustomEntityRecord.id == selected_record_id
+                    ).first()
+                    if record_obj:
+                        record_data = record_obj.data.copy() if record_obj.data else {}
+                        print(f"    - Resolved from custom_object all: {var_path} -> {record_data}")
+                        return json.dumps(record_data, ensure_ascii=False, indent=2)
+                print(f"    - Failed to resolve custom_object.all for entity type {entity_type_id}. Record not found or not selected.")
+                return "{}"
+
+            # 5. 尝试 'ai.reply' 相关变量
+            if var_path.startswith("ai.reply."):
+                ai_reply = self.context.ai.get("reply", {})
+                value = get_nested_value(ai_reply, var_path.split('.')[2:])
+                if value is not None:
+                    print(f"    - Resolved from ai.reply: {var_path} -> {value}")
+                    return str(value)
+
+            # 6. 尝试 'customer' 相关变量（兼容格式）
+            if var_path.startswith("customer."):
+                customer_obj = self.context.db.get("customer", None)
+                if customer_obj:
+                    field_name = var_path.replace("customer.", "")
+                    
+                    # 特殊处理一些常见的字段映射
+                    if field_name == "last_message":
+                        # 获取最后一条消息内容
+                        trigger_data = self.context.get("trigger_data", {})
+                        value = trigger_data.get("message")
+                        if value is not None:
+                            print(f"    - Resolved from customer.last_message (trigger): {var_path} -> {value}")
+                            return str(value)
+                        else:
+                            print(f"    - customer.last_message not found in trigger")
+                    elif hasattr(customer_obj, field_name):
+                        value = getattr(customer_obj, field_name)
+                        if value is not None:
+                            print(f"    - Resolved from customer: {var_path} -> {value}")
+                            return str(value)
+                    else:
+                        print(f"    - customer object has no field: {field_name}")
+                else:
+                    print(f"    - No customer object in context")
+
+            # 7. 尝试通用变量 (self.context.variables)
+            if var_path in self.context.variables:
+                value = self.context.variables[var_path]
+                print(f"    - Resolved from context.variables: {var_path} -> {value}")
+                return str(value)
             
-            # 记录消息到数据库
-            if customer:
-                msg = Message(
-                    content=message,
-                    direction="outbound",
-                    customer_id=customer.id,
-                    user_id=customer.user_id,
-                    ack=0  # 已发送
-                )
-                self.db.add(msg)
-                self.db.commit()
-            else:
-                logger.info("Sent Telegram message but no customer in context; skipping DB insert")
-            
-            return {
-                "ctx.message_id": result.get("telegram_message_id", "sent"),
-                "ctx.sent_at": datetime.utcnow().isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
-            raise e
+            # 如果所有尝试都失败，返回原始的变量占位符
+            print(f"    - Failed to resolve: {var_path}")
+            return match.group(0) # Return original {{variable}} or {variable} including braces
+
+        # Handle both {{variable}} and {variable} patterns
+        text = re.sub(r'''\{\{(.*?)\}\}''', replace_match, text)
+        text = re.sub(r'''\{([^{}]*)\}''', replace_match, text)
+        return text
 
 class GuardrailValidatorProcessor(NodeProcessor):
     """合规检查节点"""
@@ -1854,6 +3193,360 @@ class ConditionProcessor(NodeProcessor):
         # namespaced branch key so multiple condition nodes don't conflict
         return {f'__branch__{node_config.get("id")}': branch}
 
+class SendMessageProcessor(NodeProcessor):
+    """通用消息发送节点 - 根据触发渠道自动选择发送方式"""
+    
+    def __init__(self, db: Session, context: WorkflowContext):
+        super().__init__(db, context)
+    
+    async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """根据触发渠道自动选择发送方式"""
+        
+        # 获取触发数据中的渠道信息
+        trigger_data = self.context.get("trigger_data", {})
+        trigger_channel = trigger_data.get("channel", "whatsapp")  # 默认 WhatsApp
+        
+        # 检查节点配置中的发送模式
+        node_data = node_config.get("data", {})
+        send_mode = node_data.get("send_mode", "smart_reply")
+        specified_channel = node_data.get("channel")
+        
+        logger.info(f"📤 通用发送节点 - 发送模式: {send_mode}, 触发渠道: {trigger_channel}, 指定渠道: {specified_channel}")
+        
+        # 根据发送模式确定最终渠道
+        if send_mode == "smart_reply":
+            # 智能回复：使用触发渠道
+            channel = trigger_channel
+            logger.info(f"  智能回复模式 - 使用触发渠道: {channel}")
+        elif send_mode == "force_whatsapp":
+            # 强制发送到 WhatsApp
+            channel = "whatsapp"
+            logger.info(f"  强制 WhatsApp 模式")
+        elif send_mode == "force_telegram":
+            # 强制发送到 Telegram
+            channel = "telegram"
+            logger.info(f"  强制 Telegram 模式")
+        else:
+            # 兼容旧的配置方式：优先使用节点配置中指定的渠道，否则使用触发渠道
+            channel = specified_channel if specified_channel else trigger_channel
+            logger.info(f"  兼容模式 - 最终渠道: {channel}")
+        
+        # 根据渠道选择对应的处理器
+        if channel == "telegram":
+            processor = SendTelegramMessageProcessor(self.db, self.context)
+            # 确保 Telegram 节点配置正确
+            if not node_data.get("send_mode") or send_mode == "smart_reply":
+                node_data["send_mode"] = "smart_reply"  # 使用智能回复模式
+        elif channel == "whatsapp":
+            processor = SendWhatsAppMessageProcessor(self.db, self.context)
+            # 确保 WhatsApp 节点配置正确
+            if not node_data.get("send_mode") or send_mode == "smart_reply":
+                node_data["send_mode"] = "smart_reply"  # 使用智能回复模式
+        else:
+            raise ValueError(f"Unsupported channel: {channel}")
+        
+        # 执行对应的处理器
+        return await processor.execute(node_config)
+
+class CustomAPIProcessor(NodeProcessor):
+    """自定义 API 调用节点"""
+
+    async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"\n🔧 CustomAPI 节点开始执行...")
+        
+        user_id = self.context.get("trigger_data", {}).get("user_id")
+        if not user_id:
+            raise ValueError("User ID not found in workflow context.")
+
+        node_data = node_config.get("data", {})
+        method = node_data.get("method", "GET").upper()
+        url_template = node_data.get("url")
+        headers_template = node_data.get("headers", {})
+        body_template = node_data.get("body")
+        auth_config = node_data.get("auth", {})
+        timeout = node_data.get("timeout", 30)
+        retry_count = node_data.get("retry_count", 0)
+        response_mapping = node_data.get("response_mapping", {})
+
+        print(f"  📋 节点配置:")
+        print(f"    - Method: {method}")
+        print(f"    - URL Template: {url_template}")
+        print(f"    - Headers Template: {headers_template}")
+        print(f"    - Body Template: {body_template}")
+        print(f"    - Auth Config: {auth_config}")
+        print(f"    - Timeout: {timeout}s")
+        print(f"    - Retry Count: {retry_count}")
+        print(f"    - Response Mapping: {response_mapping}")
+
+        if not url_template:
+            raise ValueError("API URL is required for CustomAPI node.")
+
+        print(f"\n  🔍 开始变量替换...")
+        print(f"    当前上下文变量: {list(self.context.variables.keys())}")
+        
+        # 打印触发数据和客户信息用于调试
+        trigger_data = self.context.get("trigger_data", {})
+        customer = self.context.db.get("customer")
+        ai_data = self.context.get("ai", {})
+        
+        print(f"    触发数据: {trigger_data}")
+        if customer:
+            print(f"    客户信息: ID={customer.id}, Name={customer.name}, Phone={customer.phone}")
+            if hasattr(customer, 'custom_fields') and customer.custom_fields:
+                print(f"    客户自定义字段: {customer.custom_fields}")
+        if ai_data:
+            print(f"    AI 数据: {ai_data}")
+
+        # 1. 变量替换
+        print(f"\n  🔄 URL 变量替换:")
+        print(f"    原始 URL: {url_template}")
+        url = self._resolve_text_variables(url_template) if url_template else None
+        print(f"    替换后 URL: {url}")
+        
+        print(f"\n  🔄 Headers 变量替换:")
+        headers = {}
+        for k, v in headers_template.items():
+            print(f"    原始 Header {k}: {v}")
+            resolved_value = self._resolve_text_variables(v)
+            headers[k] = resolved_value
+            print(f"    替换后 Header {k}: {resolved_value}")
+        
+        print(f"\n  🔄 Body 变量替换:")
+        body = None
+        if body_template:
+            print(f"    原始 Body: {body_template}")
+            body = self._resolve_json_body_from_context(body_template)
+            print(f"    替换后 Body: {body}")
+        else:
+            print(f"    无 Body 模板")
+
+        # 2. 认证处理
+        print(f"\n  🔐 认证处理:")
+        auth_header = None
+        if auth_config.get("type") == "bearer":
+            token = auth_config.get("token")
+            if token:
+                auth_header = {"Authorization": f"Bearer {token}"}
+                print(f"    Bearer 认证: {token[:10]}..." if len(token) > 10 else f"    Bearer 认证: {token}")
+        elif auth_config.get("type") == "api_key":
+            api_key = auth_config.get("api_key")
+            header_name = auth_config.get("api_key_header", "X-API-Key")
+            if api_key and header_name:
+                auth_header = {header_name: api_key}
+                print(f"    API Key 认证: {header_name} = {api_key[:10]}..." if len(api_key) > 10 else f"    API Key 认证: {header_name} = {api_key}")
+        elif auth_config.get("type") == "basic":
+            username = auth_config.get("username")
+            password = auth_config.get("password")
+            if username and password:
+                credentials = f"{username}:{password}".encode("ascii")
+                encoded_credentials = base64.b64encode(credentials).decode("ascii")
+                auth_header = {"Authorization": f"Basic {encoded_credentials}"}
+                print(f"    Basic 认证: {username}:{'*' * len(password)}")
+        else:
+            print(f"    无认证配置")
+
+        if auth_header:
+            headers.update(auth_header)
+            print(f"    认证头已添加到请求头中")
+        
+        print(f"\n  📤 最终请求参数:")
+        print(f"    Method: {method}")
+        print(f"    URL: {url}")
+        print(f"    Headers: {headers}")
+        print(f"    Body: {body}")
+
+        # 3. 发送HTTP请求与重试
+        async def make_request():
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                if method == "GET":
+                    response = await client.get(url, headers=headers)
+                elif method == "POST":
+                    response = await client.post(url, headers=headers, json=body)
+                elif method == "PUT":
+                    response = await client.put(url, headers=headers, json=body)
+                elif method == "DELETE":
+                    response = await client.delete(url, headers=headers)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+                response.raise_for_status() # Raises HTTPStatusError for bad responses (4xx, 5xx)
+                return response
+
+        print(f"\n  🚀 开始发送 HTTP 请求...")
+        response = None
+        last_exception = None
+        for attempt in range(retry_count + 1):
+            try:
+                print(f"    尝试 {attempt + 1}/{retry_count + 1}")
+                response = await make_request()
+                print(f"    ✅ 请求成功! 状态码: {response.status_code}")
+                print(f"    响应头: {dict(response.headers)}")
+                break
+            except httpx.HTTPStatusError as e:
+                print(f"    ❌ HTTP 状态错误: {e.response.status_code}")
+                print(f"    错误响应: {e.response.text}")
+                logger.warning(f"API request failed with status {e.response.status_code}: {e.response.text}. Attempt {attempt + 1}/{retry_count + 1}")
+                last_exception = e
+            except httpx.RequestError as e:
+                print(f"    ❌ 请求错误: {e}")
+                logger.warning(f"API request error: {e}. Attempt {attempt + 1}/{retry_count + 1}")
+                last_exception = e
+            except Exception as e:
+                print(f"    ❌ 未知错误: {e}")
+                logger.warning(f"Unexpected API error: {e}. Attempt {attempt + 1}/{retry_count + 1}")
+                last_exception = e
+            
+            if attempt < retry_count:
+                wait_time = 2 ** attempt
+                print(f"    ⏱️ 等待 {wait_time} 秒后重试...")
+                await asyncio.sleep(wait_time) # Exponential backoff
+            else:
+                print(f"    🚫 所有重试失败，抛出异常")
+                raise last_exception # Re-raise if all retries fail
+
+        if not response:
+            raise ValueError("API request failed after all retries.")
+
+        # 4. 响应处理
+        print(f"\n  📥 处理 API 响应...")
+        try:
+            response_json = response.json()
+            print(f"    响应 JSON: {response_json}")
+        except Exception as e:
+            print(f"    ❌ 解析响应 JSON 失败: {e}")
+            print(f"    原始响应文本: {response.text}")
+            response_json = {"error": "Failed to parse JSON", "raw_text": response.text}
+        
+        output_data = {"status_code": response.status_code, "headers": dict(response.headers)}
+
+        if response_mapping.get("data_field"):
+            data_field_path = response_mapping["data_field"].split('.')
+            print(f"    🎯 提取数据字段: {response_mapping['data_field']} -> {data_field_path}")
+            current_data = response_json
+            try:
+                for field in data_field_path:
+                    print(f"      访问字段: {field}")
+                    current_data = current_data[field]
+                    print(f"      当前数据: {current_data}")
+                output_data["data"] = current_data
+                print(f"    ✅ 成功提取数据字段: {current_data}")
+            except (KeyError, TypeError) as e:
+                print(f"    ❌ 提取数据字段失败: {e}")
+                logger.warning(f"Could not extract data_field '{response_mapping.get('data_field')}' from API response: {e}")
+                output_data["data"] = response_json # Fallback to full response
+                print(f"    🔄 回退到完整响应")
+        else:
+            output_data["data"] = response_json
+            print(f"    📋 使用完整响应作为数据")
+
+        print(f"\n  💾 保存到上下文...")
+        print(f"    输出数据: {output_data}")
+        
+        # 保存到上下文，以便后续节点使用
+        self.context.set("api.response", output_data)
+        print(f"    ✅ 已保存到 context['api.response']")
+
+        print(f"\n  🎉 CustomAPI 节点执行完成!")
+        return output_data
+
+    def _resolve_text_variables(self, text: str) -> str:
+        """解析文本中的所有 {{variable_path}} 变量"""
+        if not isinstance(text, str):
+            return str(text)
+
+        def get_nested_value(data, path_parts):
+            current = data
+            for part in path_parts:
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                elif isinstance(current, object) and hasattr(current, part):
+                    current = getattr(current, part)
+                else:
+                    return None
+            return current
+
+        def replace_match(match):
+            var_path = match.group(1).strip()
+            print(f"      🔍 解析变量: {var_path}")
+            
+            # 尝试从各种上下文中解析变量
+            # 1. 优先尝试 'trigger' 相关变量
+            if var_path.startswith("trigger."):
+                trigger_data = self.context.get("trigger_data", {})
+                value = get_nested_value(trigger_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"        ✅ 从 trigger 解析: {var_path} -> {value}")
+                    return str(value)
+                else:
+                    print(f"        ❌ trigger 中未找到: {var_path}")
+            
+            # 2. 尝试 'db.customer' 相关变量
+            elif var_path.startswith("db.customer."):
+                customer = self.context.db.get("customer")
+                if customer:
+                    field_name = var_path.replace("db.customer.", "")
+                    if hasattr(customer, field_name):
+                        value = getattr(customer, field_name)
+                        print(f"        ✅ 从 db.customer 解析: {var_path} -> {value}")
+                        return str(value) if value is not None else ""
+                    else:
+                        print(f"        ❌ customer 对象没有字段: {field_name}")
+                else:
+                    print(f"        ❌ 上下文中没有 customer 对象")
+            
+            # 3. 尝试 'custom_fields' 相关变量
+            elif var_path.startswith("custom_fields."):
+                customer = self.context.db.get("customer")
+                if customer and hasattr(customer, 'custom_fields'):
+                    field_name = var_path.replace("custom_fields.", "")
+                    custom_fields = customer.custom_fields or {}
+                    value = custom_fields.get(field_name)
+                    if value is not None:
+                        print(f"        ✅ 从 custom_fields 解析: {var_path} -> {value}")
+                        return str(value)
+                    else:
+                        print(f"        ❌ custom_fields 中未找到: {field_name}")
+                else:
+                    print(f"        ❌ customer 对象没有 custom_fields")
+            
+            # 4. 尝试从 AI 输出中解析
+            elif var_path.startswith("ai."):
+                ai_data = self.context.ai
+                value = get_nested_value(ai_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"        ✅ 从 ai 解析: {var_path} -> {value}")
+                    return str(value)
+                else:
+                    print(f"        ❌ ai 中未找到: {var_path}")
+            
+            # 5. 尝试从 API 响应中解析
+            elif var_path.startswith("api."):
+                api_data = self.context.get("api.response", {})
+                value = get_nested_value(api_data, var_path.split('.')[1:])
+                if value is not None:
+                    print(f"        ✅ 从 api.response 解析: {var_path} -> {value}")
+                    return str(value)
+                else:
+                    print(f"        ❌ api.response 中未找到: {var_path}")
+            
+            # 6. 直接从上下文变量中查找
+            else:
+                value = self.context.get(var_path)
+                if value is not None:
+                    print(f"        ✅ 从 context 解析: {var_path} -> {value}")
+                    return str(value)
+                else:
+                    print(f"        ❌ context 中未找到: {var_path}")
+            
+            # 如果找不到变量，返回原始文本
+            print(f"        ⚠️ 变量未解析，保持原样: {var_path}")
+            return f"{{{{{var_path}}}}}"
+
+        # 使用正则表达式替换所有 {{variable}} 格式的变量
+        import re
+        result = re.sub(r'\{\{([^}]+)\}\}', replace_match, text)
+        return result
+
+
 class WorkflowEngine:
     """工作流引擎"""
     
@@ -1867,44 +3560,63 @@ class WorkflowEngine:
             "Delay": DelayProcessor,
             "SendWhatsAppMessage": SendWhatsAppMessageProcessor,
             "SendTelegramMessage": SendTelegramMessageProcessor, # 添加 Telegram 消息发送处理器
+            "SendMessage": SendMessageProcessor,  # 添加通用消息发送处理器
             "Template": TemplateProcessor,
-            "GuardrailValidator": GuardrailValidatorProcessor
+            "GuardrailValidator": GuardrailValidatorProcessor,
+            "CustomAPI": CustomAPIProcessor # 新增：自定义API处理器
         }
     
+    @retry_on_failure(max_retries=3, delay=1.0)
     async def execute_workflow(self, workflow_id: int, trigger_data: Dict[str, Any]) -> WorkflowExecution:
         """执行工作流"""
-        print(f"\n🔄 工作流執行開始 - ID: {workflow_id}")
-        print(f"  觸發資料: {trigger_data}")
+        execution_start_time = datetime.utcnow()
+        logger.info(f"🔄 工作流執行開始 - ID: {workflow_id}, 觸發資料: {trigger_data}")
         
-        # 获取工作流定义
-        workflow = self.db.query(Workflow).filter(
-            Workflow.id == workflow_id,
-            Workflow.is_active == True
-        ).first()
+        # 获取工作流定义（使用优化的查询）
+        try:
+            workflow = self.db.query(Workflow).filter(
+                Workflow.id == workflow_id,
+                Workflow.is_active == True
+            ).first()
+            
+            if not workflow:
+                logger.error(f"工作流 {workflow_id} 未找到或未啟用")
+                raise ValueError(f"Workflow {workflow_id} not found or not active")
+            
+            logger.info(f"✅ 工作流找到: {workflow.name} (節點數: {len(workflow.nodes)}, 邊數: {len(workflow.edges)})")
+            
+        except SQLAlchemyError as e:
+            logger.error(f"数据库查询工作流失败: {e}")
+            raise e
         
-        if not workflow:
-            print(f"  ❌ 工作流 {workflow_id} 未找到或未啟用")
-            raise ValueError(f"Workflow {workflow_id} not found or not active")
-        
-        print(f"  ✅ 工作流找到: {workflow.name}")
-        print(f"  節點數量: {len(workflow.nodes)}")
-        print(f"  邊數量: {len(workflow.edges)}")
-        
-        # 创建执行记录
-        execution = WorkflowExecution(
-            workflow_id=workflow_id,
-            status="running",
-            triggered_by=trigger_data.get("trigger_type", "manual"),
-            execution_data=trigger_data,
-            user_id=workflow.user_id
-        )
-        self.db.add(execution)
-        self.db.commit()
-        self.db.refresh(execution)
+        # 创建执行记录（使用安全的数据库操作）
+        execution = None
+        try:
+            async with safe_db_operation(self.db, "create_workflow_execution"):
+                execution = WorkflowExecution(
+                    workflow_id=workflow_id,
+                    status="running",
+                    triggered_by=trigger_data.get("trigger_type", "manual"),
+                    execution_data=trigger_data,
+                    user_id=workflow.user_id,
+                    started_at=execution_start_time
+                )
+                self.db.add(execution)
+                self.db.flush()  # 获取 ID 但不提交
+                execution_id = execution.id
+                
+            # 刷新执行记录
+            execution = self.db.query(WorkflowExecution).filter(WorkflowExecution.id == execution_id).first()
+            
+        except Exception as e:
+            logger.error(f"创建工作流执行记录失败: {e}")
+            raise e
         
         # 创建执行上下文
         context = WorkflowContext()
         context.set("trigger_data", trigger_data)
+        context.set("workflow_id", workflow_id)
+        context.set("execution_id", execution.id)
         
         try:
             # 按照 edges 定义的顺序执行节点
@@ -1971,7 +3683,12 @@ class WorkflowEngine:
                 # 根据节点类型和结果决定下一个节点
                 next_nodes = edge_map.get(current_node_id, [])
                 
+                # Debug: 打印边连接信息
+                print(f"  🔍 节点 {current_node_id} 的下一个节点: {next_nodes}")
+                print(f"  🔍 完整边映射: {edge_map}")
+                
                 if not next_nodes:
+                    print(f"  ⚠️ 节点 {current_node_id} 没有下一个节点，工作流结束")
                     break
                 
                 # 支持基于 Condition 的 true/false 分支路由：
@@ -2002,7 +3719,7 @@ class WorkflowEngine:
                     for e in outgoing_edges
                 )
 
-                selected_next = None
+                selected_next_nodes = []
                 if has_conditional_branch_edges:
                     # 仅在 branch_val 可用时尝试匹配条件分支
                     if branch_val is not None:
@@ -2011,53 +3728,115 @@ class WorkflowEngine:
                                 # match by explicit sourceHandle for true/false branches
                                 if isinstance(e, dict) and e.get('sourceHandle') in ['true', 'false']:
                                     if str(e.get('sourceHandle')).lower() == str(branch_val).lower():
-                                        selected_next = e.get('target')
-                                        break
+                                        selected_next_nodes.append(e.get('target'))
                             except Exception:
                                 continue
+                    
                     # 如果存在条件分支边但未找到匹配，则停止执行（不回退）
-                    if not selected_next:
+                    if not selected_next_nodes:
+                        print(f"  ⚠️ 条件分支节点 {current_node_id} 没有找到匹配的分支 '{branch_val}'，工作流结束")
                         current_node_id = None
                     else:
-                        current_node_id = selected_next
+                        # 如果有多个匹配的分支，需要并行执行
+                        if len(selected_next_nodes) > 1:
+                            print(f"  🔀 节点 {current_node_id} 有多个分支需要并行执行: {selected_next_nodes}")
+                            # 并行执行所有匹配的分支节点
+                            for next_node_id in selected_next_nodes[1:]:  # 从第二个开始并行执行
+                                if next_node_id in nodes_dict:
+                                    print(f"  🚀 并行执行分支节点: {next_node_id}")
+                                    await self._execute_node(execution, nodes_dict[next_node_id], context)
+                        # 继续执行第一个分支
+                        current_node_id = selected_next_nodes[0]
                 else:
-                    # 非条件分支：取第一个 target（包括 sourceHandle 为 "out" 等情况）
+                    # 非条件分支：检查是否有多个并行的输出节点
+                    if len(next_nodes) > 1:
+                        print(f"  🔀 节点 {current_node_id} 有多个并行输出: {next_nodes}")
+                        # 并行执行除第一个外的所有节点
+                        for next_node_id in next_nodes[1:]:
+                            if next_node_id in nodes_dict:
+                                print(f"  🚀 并行执行节点: {next_node_id}")
+                                await self._execute_node(execution, nodes_dict[next_node_id], context)
+                    # 继续执行第一个节点
                     current_node_id = next_nodes[0] if next_nodes else None
             
             # 标记执行完成
-            execution.status = "completed"
-            execution.completed_at = datetime.utcnow()
-            self.db.commit()
+            execution_end_time = datetime.utcnow()
+            execution_duration = (execution_end_time - execution_start_time).total_seconds()
             
-            return execution
+            try:
+                async with safe_db_operation(self.db, "complete_workflow_execution"):
+                    execution.status = "completed"
+                    execution.completed_at = execution_end_time
+                    execution.duration_seconds = execution_duration
+                    
+                logger.info(f"✅ 工作流執行完成 - ID: {workflow_id}, 耗時: {execution_duration:.2f}秒")
+                return execution
+                
+            except Exception as db_error:
+                logger.error(f"更新工作流完成状态失败: {db_error}")
+                # 即使数据库更新失败，工作流实际上已经成功执行
+                return execution
             
         except Exception as e:
-            execution.status = "failed"
-            execution.error_message = str(e)
-            execution.completed_at = datetime.utcnow()
-            self.db.commit()
-            logger.error(f"Workflow execution failed: {str(e)}")
+            # 更新执行状态为失败
+            execution_end_time = datetime.utcnow()
+            execution_duration = (execution_end_time - execution_start_time).total_seconds()
+            error_details = {
+                "error": str(e),
+                "type": type(e).__name__,
+                "traceback": traceback.format_exc()
+            }
+            
+            try:
+                async with safe_db_operation(self.db, "fail_workflow_execution"):
+                    execution.status = "failed"
+                    execution.error_message = str(e)
+                    execution.completed_at = execution_end_time
+                    execution.duration_seconds = execution_duration
+                    # 存储详细错误信息到 execution_data
+                    if execution.execution_data:
+                        execution.execution_data["error_details"] = error_details
+                    else:
+                        execution.execution_data = {"error_details": error_details}
+                        
+            except Exception as db_error:
+                logger.error(f"更新工作流失败状态时出错: {db_error}")
+            
+            logger.error(f"❌ 工作流執行失敗 - ID: {workflow_id}, 耗時: {execution_duration:.2f}秒, 錯誤: {str(e)}")
+            logger.debug(f"工作流执行失败详细信息: {error_details}")
             raise e
     
+    @retry_on_failure(max_retries=2, delay=0.5)
     async def _execute_node(self, execution: WorkflowExecution, node: Dict[str, Any], context: WorkflowContext):
         """执行单个节点"""
         node_id = node["id"]
         node_type = node["type"]
         
-        print(f"\n  📦 執行節點 - ID: {node_id}, 類型: {node_type}")
-        print(f"    節點配置: {node}")
+        logger.info(f"📦 執行節點 - ID: {node_id}, 類型: {node_type}")
+        logger.debug(f"節點配置: {node}")
         
-        # 创建步骤执行记录
-        step = WorkflowStepExecution(
-            execution_id=execution.id,
-            node_id=node_id,
-            node_type=node_type,
-            status="running",
-            input_data=node
-        )
-        self.db.add(step)
-        self.db.commit()
-        self.db.refresh(step)
+        # 创建步骤执行记录（使用安全的数据库操作）
+        step = None
+        try:
+            async with safe_db_operation(self.db, "create_step_execution"):
+                step = WorkflowStepExecution(
+                    execution_id=execution.id,
+                    node_id=node_id,
+                    node_type=node_type,
+                    status="running",
+                    input_data=node,
+                    started_at=datetime.utcnow()
+                )
+                self.db.add(step)
+                self.db.flush()  # 获取 ID 但不提交
+                step_id = step.id
+                
+            # 刷新步骤记录
+            step = self.db.query(WorkflowStepExecution).filter(WorkflowStepExecution.id == step_id).first()
+            
+        except Exception as e:
+            logger.error(f"创建节点执行记录失败: {e}")
+            raise e
         
         try:
             start_time = datetime.utcnow()
@@ -2088,21 +3867,66 @@ class WorkflowEngine:
             
             # 记录执行结果
             end_time = datetime.utcnow()
-            step.status = "completed"
-            step.output_data = output_data
-            step.completed_at = end_time
-            step.duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
             
-            # 记录分支信息（如果存在）
-            branch_key = f"__branch__{node_id}"
-            if context.get(branch_key):
-                step.branch_taken = context.get(branch_key)
-
-            self.db.commit()
+            try:
+                async with safe_db_operation(self.db, "complete_step_execution"):
+                    step.status = "completed"
+                    step.output_data = serialize_for_json(output_data)  # 使用序列化函数
+                    step.completed_at = end_time
+                    step.duration_ms = duration_ms
+                    
+                    # 记录分支信息（如果存在）
+                    branch_key = f"__branch__{node_id}"
+                    if context.get(branch_key):
+                        step.branch_taken = context.get(branch_key)
+                        
+                logger.info(f"✅ 節點執行完成 - ID: {node_id}, 耗時: {duration_ms}ms")
+                
+            except Exception as db_error:
+                logger.error(f"更新节点完成状态失败: {db_error}")
+                # 继续执行，不因为数据库更新失败而中断工作流
             
         except Exception as e:
-            step.status = "failed"
-            step.error_message = str(e)
-            step.completed_at = datetime.utcnow()
-            self.db.commit()
+            # 记录节点执行失败
+            end_time = datetime.utcnow()
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            error_details = {
+                "error": str(e),
+                "type": type(e).__name__,
+                "traceback": traceback.format_exc(),
+                "node_config": node
+            }
+            
+            try:
+                async with safe_db_operation(self.db, "fail_step_execution"):
+                    step.status = "failed"
+                    step.error_message = str(e)
+                    step.completed_at = end_time
+                    step.duration_ms = duration_ms
+                    # 存储详细错误信息
+                    step.output_data = serialize_for_json({"error_details": error_details})
+                    
+            except Exception as db_error:
+                logger.error(f"更新节点失败状态时出错: {db_error}")
+            
+            logger.error(f"❌ 節點執行失敗 - ID: {node_id}, 類型: {node_type}, 耗時: {duration_ms}ms, 錯誤: {str(e)}")
+            logger.debug(f"节点执行失败详细信息: {error_details}")
             raise e
+
+    def _resolve_variable_from_context(self, variable_path: str, default: Any = None) -> Any:
+        # 支持: trigger.X, db.customer.field, ai.field
+        try:
+            if variable_path.startswith('trigger.'):
+                return self.context.get('trigger_data', {}).get(variable_path.split('.', 1)[1])
+            if variable_path.startswith('db.customer.'):
+                customer = self.context.db.get('customer')
+                if customer:
+                    return getattr(customer, variable_path.split('.', 2)[2], None)
+                return None
+            if variable_path.startswith('ai.'):
+                return self.context.get('ai', {}).get(variable_path.split('.', 1)[1])
+            # fallback to variables
+            return self.context.get(variable_path)
+        except Exception:
+            return default

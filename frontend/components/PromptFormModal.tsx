@@ -59,19 +59,40 @@ export default function PromptFormModal({ prompt, onSave, onCancel }: PromptForm
  
   // 通用文本插入函数，用于在光标位置插入文本
   const insertTextAtCaret = (textarea: HTMLTextAreaElement, textToInsert: string) => {
+    console.log('🔧 insertTextAtCaret called with:', textToInsert);
+    console.log('🔧 textarea:', textarea);
+    console.log('🔧 current value:', textarea.value);
+    
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
     const value = textarea.value;
 
-    const newValue = value.substring(0, start) + textToInsert + value.substring(end);
-    textarea.value = newValue; // 直接修改 DOM 元素的值
+    console.log('🔧 selection start:', start, 'end:', end);
 
-    // 更新 React 状态，通过 dispatchEvent 模拟 input 事件触发 onChange
+    const newValue = value.substring(0, start) + textToInsert + value.substring(end);
+    
+    console.log('🔧 new value:', newValue);
+    
+    // 同时更新 DOM 和 React 状态
+    textarea.value = newValue;
+    
+    if (textarea === systemPromptRef.current) {
+      console.log('🔧 Updating system_prompt state');
+      setFormData(prev => ({ ...prev, system_prompt: newValue }));
+    } else if (textarea === userPromptRef.current) {
+      console.log('🔧 Updating user_prompt state');
+      setFormData(prev => ({ ...prev, user_prompt: newValue }));
+    }
+    
+    // 设置光标位置
+    textarea.selectionStart = textarea.selectionEnd = start + textToInsert.length;
+    textarea.focus();
+    
+    // 触发 input 事件以确保 React 知道值已更改
     const event = new Event('input', { bubbles: true });
     textarea.dispatchEvent(event);
-
-    // 重新设置光标位置
-    textarea.selectionStart = textarea.selectionEnd = start + textToInsert.length;
+    
+    console.log('🔧 insertTextAtCaret completed');
   };
 
   // 处理知识库选择（包括单个知识库和类别）
@@ -307,12 +328,20 @@ export default function PromptFormModal({ prompt, onSave, onCancel }: PromptForm
         '触发器数据': [
           { label: '发送者姓名', value: '{{trigger.name}}', description: '发送消息的用户姓名' },
           { label: '发送者电话', value: '{{trigger.phone}}', description: '发送消息的用户电话号码' },
-          { label: '发送者邮箱', value: '{{trigger.email}}', description: '发送消息的用户邮箱' },
-          { label: '消息内容', value: '{{trigger.content}}', description: '用户发送的原始消息内容' },
-          { label: '消息类型', value: '{{trigger.message_type}}', description: '消息类型（文本/图片/视频等）' },
+          { label: '聊天ID', value: '{{trigger.chat_id}}', description: 'Telegram 聊天ID' },
+          { label: '消息内容', value: '{{trigger.message}}', description: '用户发送的原始消息内容' },
           { label: '时间戳', value: '{{trigger.timestamp}}', description: '消息发送的时间' },
-          { label: '触发器ID', value: '{{trigger.id}}', description: '触发器的唯一标识' },
-          { label: '消息来源', value: '{{trigger.source}}', description: '消息来源平台（WhatsApp/Telegram等）' },
+          { label: '用户ID', value: '{{trigger.user_id}}', description: '系统用户ID' },
+          { label: '消息来源', value: '{{trigger.channel}}', description: '消息来源平台（whatsapp/telegram）' },
+        ],
+        'AI 输出': [
+          { label: 'AI 回复文本', value: '{{ai.reply.reply_text}}', description: 'AI 生成的回复内容' },
+          { label: 'AI 分析结果', value: '{{ai.analyze}}', description: 'AI 分析的完整结果' },
+          { label: 'AI 置信度', value: '{{ai.analyze.confidence}}', description: 'AI 分析的置信度评分' },
+        ],
+        'API 响应': [
+          { label: 'API 响应数据', value: '{{api.response.data}}', description: 'API 调用返回的数据' },
+          { label: 'API 状态码', value: '{{api.response.status_code}}', description: 'API 调用的HTTP状态码' },
         ],
         '客户基础信息': response.basic_fields || [],
         '客户自定义字段': response.custom_fields || []
@@ -324,6 +353,11 @@ export default function PromptFormModal({ prompt, onSave, onCancel }: PromptForm
 
   // 处理变量选择
   const handleVariableSelect = (variableValue: string) => {
+    console.log('🔍 handleVariableSelect called with:', variableValue);
+    console.log('🔍 showVariableSelector.position:', showVariableSelector.position);
+    console.log('🔍 systemPromptRef.current:', systemPromptRef.current);
+    console.log('🔍 userPromptRef.current:', userPromptRef.current);
+    
     let finalVariableValue = variableValue;
     // 如果变量是自定义实体记录字段，则替换 recordId 占位符
     if (variableValue.includes('.recordId.') && selectedCustomEntityRecordId) {
@@ -339,10 +373,16 @@ export default function PromptFormModal({ prompt, onSave, onCancel }: PromptForm
       }
     }
 
+    console.log('🔍 finalVariableValue:', finalVariableValue);
+
     if (showVariableSelector.position === 'system_prompt' && systemPromptRef.current) {
+      console.log('✅ Inserting into system_prompt');
       insertTextAtCaret(systemPromptRef.current, finalVariableValue);
     } else if (showVariableSelector.position === 'user_prompt' && userPromptRef.current) {
+      console.log('✅ Inserting into user_prompt');
       insertTextAtCaret(userPromptRef.current, finalVariableValue);
+    } else {
+      console.log('❌ No valid target found for insertion');
     }
     setShowVariableSelector({ show: false });
     setFilteredSuggestions([]);
@@ -619,7 +659,7 @@ export default function PromptFormModal({ prompt, onSave, onCancel }: PromptForm
               value={formData.user_prompt}
               onChange={(e) => setFormData({ ...formData, user_prompt: e.target.value })}
               onKeyUp={(e) => handlePromptInput(e, 'user_prompt')} // 添加 onKeyUp 事件监听器
-              placeholder="客户说：{{trigger.content}}。请以固定JSON格式输出分析结果。"
+              placeholder="客户刚刚发送的最新消息：{{trigger.message}}&#10;&#10;请根据以上消息内容进行分析和回复。"
               rows={6}
               style={{
                 width: '100%',

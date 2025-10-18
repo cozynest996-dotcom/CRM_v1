@@ -11,11 +11,12 @@
  * - 本组件只负责 UI 层配置，不会直接发起网络请求或修改数据库。
  * - 在将数据发送到后端前，父组件应对 data 做序列化/清理（例如移除 React 元素或函数引用）。
  */
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Node as RFNode } from 'reactflow'
 import api from '../utils/api'
 import { PlayCircleOutlined } from '@ant-design/icons' // 导入 PlayCircleOutlined 图标
 import PromptFormModal, { Prompt } from './PromptFormModal' // 导入 PromptFormModal 和 Prompt 接口
+import { v4 as uuidv4 } from 'uuid' // 导入 uuid
 
 interface NodeConfigProps {
   node: RFNode
@@ -24,8 +25,8 @@ interface NodeConfigProps {
 }
 
 export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps) {
-  const [showVariableSelector, setShowVariableSelector] = useState<{show: boolean, position?: string, anchor?: { left: number, top: number }} >({ show: false })
-  const [showMediaSelector, setShowMediaSelector] = useState<{show: boolean, position?: string, anchor?: { left: number, top: number }} >({ show: false })
+  const [showVariableSelector, setShowVariableSelector] = useState<{show: boolean, position?: string, anchor?: DOMRect }>({ show: false })
+  const [showMediaSelector, setShowMediaSelector] = useState<{show: boolean, position?: string, anchor?: DOMRect }>({ show: false })
   const [showPromptPreview, setShowPromptPreview] = useState(false) // 新增：显示 prompt 预览
   const [showPromptEditor, setShowPromptEditor] = useState(false) // 新增：显示 prompt 编辑器
   const [localData, setLocalData] = useState<any>(node.data || {})
@@ -46,14 +47,41 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const [selectedCustomEntityRecordId, setSelectedCustomEntityRecordId] = useState<number | null>(null) // 新增：选中的自定义实体记录ID
   const [customEntityRecords, setCustomEntityRecords] = useState<any[]>([]) // 新增：特定实体类型下的记录
   const [showSaveNotification, setShowSaveNotification] = useState<string | null>(null)
-  const [showKnowledgeBaseSelector, setShowKnowledgeBaseSelector] = useState<{show: boolean, position?: string, anchor?: { left: number, top: number }} >({ show: false })
+  const [showKnowledgeBaseSelector, setShowKnowledgeBaseSelector] = useState<{show: boolean, position?: string, anchor?: DOMRect }>({ show: false })
   const [knowledgeBases, setKnowledgeBases] = useState<any[]>([]) // 新增：知识库列表
+  const [showAdvancedApiConfig, setShowAdvancedApiConfig] = React.useState(false) // CustomAPI 的高级配置开关
+  const [expandedSections, setExpandedSections] = useState({
+    basic: true,
+    dataUpdate: false,
+    messageReply: false,
+    handoff: false,
+    advanced: false
+  })
+
+  // Helper function to get display title for node types
+  const getNodeTitle = (type: string) => {
+    switch (type) {
+      case 'MessageTrigger': return '消息触发器';
+      case 'AI': return 'AI 处理';
+      case 'Condition': return '条件判断';
+      case 'UpdateDB': return '更新数据库';
+      case 'Delay': return '延迟';
+      case 'SendWhatsAppMessage': return '发送消息'; // 兼容旧名称，统一显示为"发送消息"
+      case 'SendTelegramMessage': return '发送 Telegram 消息';
+      case 'SendMessage': return '发送消息'; // 通用发送消息节点
+      case 'CustomAPI': return '自定义API';
+      case 'Template': return '模板消息';
+      case 'GuardrailValidator': return '内容审核';
+      case 'Handoff': return '转接人工';
+      default: return type;
+    }
+  };
 
   // 打开变量选择器并锚定到触发元素位置
   const openVariableSelector = (e: any, position?: string) => {
     try {
       const rect = e?.currentTarget?.getBoundingClientRect?.();
-      const anchor = rect ? { left: rect.left + window.scrollX, top: rect.bottom + window.scrollY } : undefined;
+      const anchor = rect ? rect : undefined; // 直接使用 DOMRect
       setShowVariableSelector({ show: true, position: position, ...(anchor ? { anchor } : {}) });
     } catch (err) {
       setShowVariableSelector({ show: true, position: position });
@@ -64,7 +92,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const openMediaSelector = (e: any, position?: string) => {
     try {
       const rect = e?.currentTarget?.getBoundingClientRect?.();
-      const anchor = rect ? { left: rect.left + window.scrollX, top: rect.bottom + window.scrollY } : undefined;
+      const anchor = rect ? rect : undefined; // 直接使用 DOMRect
       setShowMediaSelector({ show: true, position: position, ...(anchor ? { anchor } : {}) });
     } catch (err) {
       setShowMediaSelector({ show: true, position: position });
@@ -239,6 +267,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       };
       fetchPromptLibrary();
       fetchCustomEntityTypes(); // 在 AI 节点类型时获取自定义实体类型
+      fetchCustomerFields(); // 获取完整的客户字段信息
       const fetchKnowledgeBases = async () => {
         try {
           const response = await api.get('/api/knowledge-base/');
@@ -260,6 +289,13 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       setCustomEntityRecords([]); // 如果没有选择实体类型，则清空记录
     }
   }, [selectedCustomEntityTypeId]);
+
+  // 新增：当节点类型为 UpdateDB 时，加载客户字段信息
+  useEffect(() => {
+    if (node.type === 'UpdateDB') {
+      fetchCustomerFields(); // 获取完整的客户字段信息
+    }
+  }, [node.type]);
 
   // 当 promptLibrary 或 selectedPromptId 变化时，自动更新节点数据
   useEffect(() => {
@@ -287,6 +323,80 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     onUpdate(node.id, newData)
   }
 
+  // 存储当前光标位置和输入框引用
+  const [cursorPosition, setCursorPosition] = useState<{[key: string]: number}>({});
+  const inputRefs = useRef<{[key: string]: HTMLInputElement | HTMLTextAreaElement}>({});
+
+  // 处理输入框的键盘事件，支持 @ 激活变量选择器
+  const handleInputKeyDown = (e: React.KeyboardEvent, fieldName: string) => {
+    if (e.key === '@') {
+      e.preventDefault(); // 阻止 @ 字符输入
+      
+      // 记录当前光标位置
+      const target = e.target as HTMLInputElement | HTMLTextAreaElement;
+      setCursorPosition(prev => ({
+        ...prev,
+        [fieldName]: target.selectionStart || 0
+      }));
+      
+      // 立即打开变量选择器
+      setShowVariableSelector({ show: true, position: fieldName });
+      fetchCustomerFields();
+    }
+  };
+
+  // 处理光标位置变化
+  const handleInputSelect = (e: React.SyntheticEvent, fieldName: string) => {
+    const target = e.target as HTMLInputElement | HTMLTextAreaElement;
+    setCursorPosition(prev => ({
+      ...prev,
+      [fieldName]: target.selectionStart || 0
+    }));
+  };
+
+  // 插入文本到光标位置的通用函数
+  const insertTextAtCursor = (fieldName: string, textToInsert: string) => {
+    const element = inputRefs.current[fieldName];
+    if (!element) return;
+
+    const start = cursorPosition[fieldName] ?? element.selectionStart ?? element.value.length;
+    const end = element.selectionEnd ?? start;
+    const currentValue = element.value;
+    
+    const newValue = currentValue.substring(0, start) + textToInsert + currentValue.substring(end);
+    
+    // 直接更新React状态
+    if (fieldName === 'url') {
+      updateNodeData({ url: newValue });
+    } else if (fieldName === 'body') {
+      updateNodeData({ body: newValue });
+    } else if (fieldName === 'fallback_template') {
+      updateNodeData({ fallback_template: newValue });
+    } else if (fieldName === 'system_prompt') {
+      updateNodeData({ system_prompt: newValue });
+    } else if (fieldName === 'user_prompt') {
+      updateNodeData({ user_prompt: newValue });
+    } else if (fieldName === 'match_value') {
+      updateNodeData({ match_value: newValue });
+    } else if (fieldName.startsWith('static_')) {
+      const updateId = fieldName.replace('static_', '');
+      const staticUpdates = localData.static_updates || [];
+      const newStaticUpdates = staticUpdates.map((update: any) => 
+        update.id === updateId 
+          ? { ...update, value: newValue }
+          : update
+      );
+      updateNodeData({ static_updates: newStaticUpdates });
+    }
+    
+    // 延迟设置光标位置，确保DOM已更新
+    setTimeout(() => {
+      const newCursorPos = start + textToInsert.length;
+      element.setSelectionRange(newCursorPos, newCursorPos);
+      element.focus();
+    }, 10);
+  };
+
   const handleVariableSelect = (variableValue: string) => {
     let finalVariableValue = variableValue;
     // 如果变量是自定义实体记录字段，则替换 recordId 占位符
@@ -303,11 +413,14 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       }
     }
 
-    if (showVariableSelector.position === 'fallback') {
-      const currentTemplate = localData.fallback_template || '';
-      const newTemplate = currentTemplate + finalVariableValue;
-      updateNodeData({ fallback_template: newTemplate });
-    } else if (showVariableSelector.position === 'system_prompt') {
+    const position = showVariableSelector.position;
+
+    // 使用光标位置插入变量
+    if (position === 'url' || position === 'body') {
+      insertTextAtCursor(position, finalVariableValue);
+    } else if (position === 'fallback') {
+      insertTextAtCursor('fallback_template', finalVariableValue);
+    } else if (position === 'system_prompt') {
       if (selectedPromptId) {
         setPromptLibrary(promptLibrary.map((p: any) => 
           p.id === selectedPromptId 
@@ -315,11 +428,9 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             : p
         ));
       } else {
-        const currentPrompt = localData.system_prompt || '';
-        const newPrompt = currentPrompt + finalVariableValue;
-        updateNodeData({ system_prompt: newPrompt });
+        insertTextAtCursor('system_prompt', finalVariableValue);
       }
-    } else if (showVariableSelector.position === 'user_prompt') {
+    } else if (position === 'user_prompt') {
       if (selectedPromptId) {
         setPromptLibrary(promptLibrary.map((p: any) => 
           p.id === selectedPromptId 
@@ -327,14 +438,17 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             : p
         ));
       } else {
-        const currentPrompt = localData.user_prompt || '';
-        const newPrompt = currentPrompt + finalVariableValue;
-        updateNodeData({ user_prompt: newPrompt });
+        insertTextAtCursor('user_prompt', finalVariableValue);
       }
+    } else if (position === 'match_value') {
+      insertTextAtCursor('match_value', finalVariableValue);
+    } else if (position?.startsWith('static_')) {
+      const updateId = position.replace('static_', '');
+      insertTextAtCursor(`static_${updateId}`, finalVariableValue);
     } else {
       const variables = localData.variables || {};
-      if (showVariableSelector.position) {
-        variables[showVariableSelector.position] = finalVariableValue;
+      if (position) {
+        variables[position] = finalVariableValue;
         updateNodeData({ variables });
       }
     }
@@ -347,117 +461,121 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const renderMessageTriggerConfig = () => (
     <>
       <div className="config-field">
-        <label>触发渠道</label>
+        <label>消息来源平台</label>
         <select
-          value={localData.channel || 'whatsapp'}
-          onChange={(e) => updateNodeData({ channel: e.target.value })}
+          value={localData.config?.channel || localData.channel || 'whatsapp'}
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                channel: e.target.value,
+              },
+              // 同时更新 data.channel 以保持兼容性
+              channel: e.target.value
+            });
+          }}
         >
-          <option value="whatsapp">WhatsApp</option>
-          <option value="telegram">Telegram</option>
-          <option value="form">表单</option>
-          <option value="support">客服台</option>
+          <option value="whatsapp">📱 WhatsApp 消息</option>
+          <option value="telegram">✈️ Telegram 消息</option>
         </select>
-      </div>
-      <div className="config-field">
-        <label>匹配字段</label>
-        <select
-          value={localData.match_key || 'phone'}
-          onChange={(e) => updateNodeData({ match_key: e.target.value })}
-        >
-          <option value="phone">手机号</option>
-          <option value="email">邮箱</option>
-          <option value="customer_id">客户ID</option>
-        </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          选择从哪个平台接收客户消息来触发工作流
+        </div>
       </div>
     </>
   )
 
-  const renderAIConfig = () => (
-    <>
+  const renderAIConfig = () => {
+    const toggleSection = (section: string) => {
+      setExpandedSections(prev => ({
+        ...prev,
+        [section]: !prev[section]
+      }))
+    }
+
+    // 数据更新字段管理
+    const updateFields = localData.update_fields || []
+
+    const addUpdateField = () => {
+      const newFields = [...updateFields, {
+                id: uuidv4(),
+        field_name: '',
+        output_key: '',
+        data_type: 'string',
+                description: '',
+        example: '',
+        enabled: true
+      }]
+      updateNodeData({ update_fields: newFields })
+    }
+
+    const removeUpdateField = (id: string) => {
+      const newFields = updateFields.filter((f: any) => f.id !== id)
+      updateNodeData({ update_fields: newFields })
+    }
+
+    const updateField = (id: string, updates: any) => {
+      const newFields = updateFields.map((f: any) => 
+        f.id === id ? { ...f, ...updates } : f
+      )
+      updateNodeData({ update_fields: newFields })
+    }
+
+    return (
+      <>
+        {/* 基础配置 */}
+        <div className="config-section">
+          <div 
+            className="section-header"
+            onClick={() => toggleSection('basic')}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: expandedSections.basic ? '16px' : '8px',
+              border: '1px solid #e2e8f0'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '16px' }}>⚙️</span>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>基础配置</h3>
+              <span style={{ 
+                fontSize: '12px', 
+                color: '#666',
+                background: '#e2e8f0',
+                padding: '2px 8px',
+                borderRadius: '12px'
+              }}>
+                {localData.model?.name || 'GPT-4 Mini'}
+              </span>
+        </div>
+            <span style={{ fontSize: '14px', color: '#666' }}>
+              {expandedSections.basic ? '🔽' : '▶️'}
+            </span>
+      </div>
+
+          {expandedSections.basic && (
+            <div className="section-content" style={{ marginBottom: '16px' }}>
       <div className="config-field">
-        <label>AI模型</label>
+                <label>🤖 AI 模型</label>
         <select
           value={localData.model?.name || 'gpt-4o-mini'}
           onChange={(e) => updateNodeData({ 
             model: { ...localData.model, name: e.target.value }
           })}
         >
-          <option value="gpt-4o-mini">GPT-4 Mini</option>
-          <option value="gpt-4">GPT-4</option>
-          <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                  <option value="gpt-4o-mini">GPT-4 Mini (推荐)</option>
+                  <option value="gpt-4">GPT-4 (高质量)</option>
+                  <option value="gpt-3.5-turbo">GPT-3.5 Turbo (快速)</option>
         </select>
       </div>
 
       <div className="config-field">
-        <label>选择或创建 AI Prompt</label>
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-          <select
-            value={selectedPromptId || ''}
-            onChange={(e) => setSelectedPromptId(e.target.value)}
-            style={{ flex: 1 }}
-          >
-            <option value="">-- 新建 Prompt --</option>
-            {promptLibrary.map((prompt: any) => (
-              <option key={prompt.id} value={prompt.id}>
-                {prompt.name}
-              </option>
-            ))}
-          </select>
-            <button
-              className="small-action-button"
-              onClick={() => {
-              // TODO: Logic to create a new prompt in the library
-              const newPrompt = {
-                id: Date.now().toString(),
-                _local: true,
-                name: `新 Prompt ${promptLibrary.length + 1}`,
-                description: '',
-                system_prompt: '',
-                user_prompt: '',
-              }
-              setPromptLibrary([...promptLibrary, newPrompt]);
-              setSelectedPromptId(newPrompt.id);
-            }}
-          >
-            新建
-            </button>
-        </div>
-      </div>
-
-      {/* 预览按钮 */}
-      {selectedPromptId && promptLibrary.find((p: any) => p.id === selectedPromptId) && (
-      <div className="config-field">
-            <button
-              className="small-action-button"
-            onClick={() => setShowPromptPreview(true)}
-            style={{ 
-              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', 
-              color: 'white',
-              width: '100%',
-              padding: '12px',
-              fontSize: '14px',
-              fontWeight: '600'
-            }}
-          >
-            🔍 预览完整 Prompt
-            </button>
-          </div>
-      )}
-
-      {selectedPromptId && promptLibrary.find((p: any) => p.id === selectedPromptId) ? (
-        <>
-          {/* Prompt 名称/描述 已移入编辑模态（避免主配置面板拥挤） */}
-
-          {/* Prompt 的编辑/删除操作已移除；请在 AI Prompt Library 页面或预览中管理 Prompt */}
-        </>
-      ) : (
-        <div className="config-field">
-          <p style={{ color: '#666', textAlign: 'center' }}>请选择一个 Prompt 或点击 "新建" 创建。</p>
-        </div>
-      )}
-
-      <div className="config-field">
-        <label>温度 (0-1)</label>
+                <label>🌡️ 温度设置 (0-1)</label>
         <input
           type="number"
           min="0"
@@ -472,15 +590,15 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           })}
         />
         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          较低值更保守，较高值更创造性
+                  较低值更保守准确，较高值更创造灵活
         </div>
       </div>
 
       <div className="config-field">
-        <label>最大令牌数</label>
+                <label>📏 最大令牌数</label>
         <input
           type="number"
-          min="1"
+                  min="100"
           max="4000"
           value={localData.model?.max_tokens || 800}
           onChange={(e) => updateNodeData({
@@ -492,23 +610,548 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         />
       </div>
 
+              {/* 聊天历史配置 */}
       <div className="config-field">
-        <label>Handoff 置信度阈值 (0-1)</label>
+                <label>💬 聊天历史设置</label>
+                <div style={{ marginTop: '8px' }}>
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                      <input
+                        type="checkbox"
+                        checked={localData.chat_history?.enabled || false}
+                        onChange={(e) => updateNodeData({
+                          chat_history: {
+                            ...localData.chat_history,
+                            enabled: e.target.checked
+                          }
+                        })}
+                        style={{ marginRight: '8px' }}
+                      />
+                      启用聊天历史
+                    </label>
+                  </div>
+
+                  {localData.chat_history?.enabled && (
+                    <div style={{ marginLeft: '24px' }}>
+                      <div style={{ marginBottom: '12px' }}>
+                        <label style={{ fontSize: '12px', color: '#666' }}>历史记录条数:</label>
         <input
           type="number"
-          min="0"
-          max="1"
-          step="0.01"
-          value={localData.handoff_threshold ?? 0.6}
-          onChange={(e) => updateNodeData({ handoff_threshold: parseFloat(e.target.value) })}
+                          min="1"
+                          max="50"
+                          value={localData.chat_history?.message_count || 10}
+                          onChange={(e) => updateNodeData({
+                            chat_history: {
+                              ...localData.chat_history,
+                              message_count: parseInt(e.target.value)
+                            }
+                          })}
+                          style={{ width: '80px', marginLeft: '8px' }}
+                        />
+                      </div>
+                      
+                      <div style={{ marginBottom: '12px' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', fontSize: '12px' }}>
+                          <input
+                            type="checkbox"
+                            checked={localData.chat_history?.include_timestamps || false}
+                            onChange={(e) => updateNodeData({
+                              chat_history: {
+                                ...localData.chat_history,
+                                include_timestamps: e.target.checked
+                              }
+                            })}
+                            style={{ marginRight: '8px' }}
+                          />
+                          包含时间戳
+                        </label>
+                        <div style={{ fontSize: '11px', color: '#666', marginTop: '4px', marginLeft: '20px' }}>
+                          在聊天历史中显示每条消息的发送时间
+                        </div>
+                      </div>
+
+                      {/* 聊天历史示例 */}
+                      <div style={{ 
+                        background: '#f8fafc', 
+                        padding: '12px', 
+                        borderRadius: '8px',
+                        border: '1px solid #e2e8f0',
+                        marginTop: '8px'
+                      }}>
+                        <div style={{ fontSize: '12px', color: '#475569', fontWeight: '600', marginBottom: '8px' }}>
+                          📋 聊天历史格式示例:
+                        </div>
+                        <div style={{ 
+                          fontSize: '11px', 
+                          color: '#64748b',
+                          fontFamily: 'monospace',
+                          lineHeight: '1.4'
+                        }}>
+                          {localData.chat_history?.include_timestamps ? (
+                            <>
+                              客户 [2024-01-15 14:30]: 你好，我想了解一下房源信息<br/>
+                              AI [2024-01-15 14:31]: 您好！很高兴为您服务...<br/>
+                              客户 [2024-01-15 14:32]: 有什么推荐的吗？
+                            </>
+                          ) : (
+                            <>
+                              客户: 你好，我想了解一下房源信息<br/>
+                              AI: 您好！很高兴为您服务...<br/>
+                              客户: 有什么推荐的吗？
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="config-field">
+                <label>📚 Prompt 模板选择</label>
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginTop: '8px' }}>
+          <select
+            value={selectedPromptId || ''}
+            onChange={(e) => setSelectedPromptId(e.target.value)}
+            style={{ flex: 1, padding: '8px 12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}
+          >
+                    <option value="">-- 使用动态生成的 Prompt --</option>
+            {promptLibrary.map((prompt: any) => (
+              <option key={prompt.id} value={prompt.id}>
+                {prompt.name}
+              </option>
+            ))}
+          </select>
+            <button
+              className="small-action-button"
+              onClick={async () => {
+                try {
+                  const newPromptData = {
+                    name: `新 Prompt ${promptLibrary.length + 1}`,
+                    description: '',
+                    system_prompt: '',
+                    user_prompt: '',
+                  }
+                  
+                  // 保存到后端数据库
+                  const savedPrompt = await api.post('/api/prompt-library', newPromptData);
+                  
+                  // 更新本地状态
+                  setPromptLibrary([...promptLibrary, savedPrompt]);
+                  setSelectedPromptId(savedPrompt.id);
+                } catch (error) {
+                  console.error('Error creating new prompt:', error);
+                  alert('创建新 Prompt 失败，请重试');
+                }
+              }}
+                    style={{ 
+                      fontSize: '12px', 
+                      padding: '8px 16px', 
+                      borderRadius: '8px', 
+                      background: 'linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)', 
+                      color: 'white', 
+                      border: 'none',
+                      fontWeight: '600',
+                      boxShadow: '0 2px 8px rgba(139, 92, 246, 0.2)'
+                    }}
+          >
+            新建
+            </button>
+            {/* 新增：预览 Prompt 按钮 */}
+            <button
+              className="small-action-button"
+              onClick={() => setShowPromptPreview(true)}
+              disabled={!selectedPromptId}
+              style={{
+                fontSize: '12px', 
+                padding: '8px 16px', 
+                borderRadius: '8px', 
+                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', 
+                color: 'white', 
+                border: 'none',
+                fontWeight: '600',
+                boxShadow: '0 2px 8px rgba(37, 99, 235, 0.2)'
+              }}
+            >
+              预览
+            </button>
+        </div>
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  选择预设 Prompt 模板，或留空使用基于字段配置动态生成的 Prompt
+                </div>
+              </div>
+            </div>
+          )}
+      </div>
+
+        {/* 数据更新配置 */}
+        <div className="config-section">
+          <div 
+            className="section-header"
+            onClick={() => toggleSection('dataUpdate')}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: expandedSections.dataUpdate ? '16px' : '8px',
+              border: '1px solid #0ea5e9'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '16px' }}>📊</span>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>数据更新配置</h3>
+              <span style={{ 
+                fontSize: '12px', 
+                color: '#0369a1',
+                background: '#e0f2fe',
+                padding: '2px 8px',
+                borderRadius: '12px'
+              }}>
+                {updateFields.filter((f: any) => f.enabled).length} 个字段
+              </span>
+            </div>
+            <span style={{ fontSize: '14px', color: '#666' }}>
+              {expandedSections.dataUpdate ? '🔽' : '▶️'}
+            </span>
+          </div>
+
+          {expandedSections.dataUpdate && (
+            <div className="section-content" style={{ marginBottom: '16px' }}>
+      <div className="config-field">
+                <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                  <input
+                    type="checkbox"
+                    checked={localData.enable_data_update || false}
+                    onChange={(e) => updateNodeData({ enable_data_update: e.target.checked })}
+                    style={{ marginRight: '8px' }}
+                  />
+                  启用数据更新功能
+                </label>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  让 AI 分析客户消息并提取结构化信息用于数据库更新
+        </div>
+      </div>
+
+              {localData.enable_data_update && (
+                <>
+      <div className="config-field">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                      <label>📋 配置要分析的字段</label>
+            <button
+                        type="button"
+                        onClick={addUpdateField}
+                        className="small-action-button primary"
+                        style={{ fontSize: '12px', padding: '6px 12px' }}
+                      >
+                        + 添加字段
+                      </button>
+                    </div>
+                    
+                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
+                      配置 AI 需要从客户消息中分析和提取的信息字段
+                    </div>
+
+                    {updateFields.length === 0 ? (
+                      <div style={{ 
+                        padding: '20px', 
+                        textAlign: 'center', 
+                        color: '#666', 
+                        border: '2px dashed #ddd', 
+                        borderRadius: '8px',
+                        background: '#f9f9f9'
+                      }}>
+                        点击"添加字段"开始配置 AI 数据分析
+                      </div>
+                    ) : (
+                      <div className="update-fields-list">
+                        {updateFields.map((field: any, index: number) => (
+                          <div key={field.id} className="field-item" style={{
+                            padding: '16px',
+                            border: '1px solid #e2e8f0',
+                            borderRadius: '8px',
+                            marginBottom: '12px',
+                            background: field.enabled ? '#ffffff' : '#f8f9fa'
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                              <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '600' }}>
+                                分析字段 #{index + 1}
+                              </h4>
+                              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                <label style={{ display: 'flex', alignItems: 'center', fontSize: '12px' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={field.enabled}
+                                    onChange={(e) => updateField(field.id, { enabled: e.target.checked })}
+                                    style={{ marginRight: '4px' }}
+                                  />
+                                  启用
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => removeUpdateField(field.id)}
+              className="small-action-button"
+            style={{ 
+                                    background: '#ef4444',
+              color: 'white',
+                                    fontSize: '12px',
+                                    padding: '4px 8px'
+                                  }}
+                                >
+                                  删除
+            </button>
+                              </div>
+                            </div>
+
+                            <div style={{ marginBottom: '12px' }}>
+                              <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                                🎯 选择要分析的客户字段
+                              </label>
+                              <select
+                                value={field.output_key}
+                                onChange={(e) => {
+                                  const selectedField = e.target.value;
+                                  // 从 availableVariables 中查找对应的字段信息
+                                  let fieldLabel = selectedField;
+                                  
+                                  // 查找基础字段
+                                  const basicField = availableVariables['客户基础信息']?.find((f: any) => f.value === `{{db.customer.${selectedField}}}`);
+                                  if (basicField) {
+                                    fieldLabel = basicField.label;
+                                  } else {
+                                    // 查找自定义字段
+                                    const customField = availableVariables['客户自定义字段']?.find((f: any) => f.value === `{{${selectedField}}}`);
+                                    if (customField) {
+                                      fieldLabel = customField.label;
+                                    }
+                                  }
+                                  
+                                  updateField(field.id, { 
+                                    output_key: selectedField,
+                                    field_name: fieldLabel
+                                  });
+                                }}
+                                style={{ width: '100%' }}
+                              >
+                                <option value="">选择字段...</option>
+                                {availableVariables['客户基础信息'] && availableVariables['客户基础信息'].length > 0 && (
+                                  <optgroup label="基础字段">
+                                    {availableVariables['客户基础信息'].map((field: any) => {
+                                      // 从 {{db.customer.field_name}} 中提取字段名
+                                      const fieldKey = field.value.replace('{{db.customer.', '').replace('}}', '');
+                                      return (
+                                        <option key={fieldKey} value={fieldKey}>
+                                          {field.label} ({fieldKey})
+                                        </option>
+                                      );
+                                    })}
+                                  </optgroup>
+                                )}
+                                {availableVariables['客户自定义字段'] && availableVariables['客户自定义字段'].length > 0 && (
+                                  <optgroup label="自定义字段">
+                                    {availableVariables['客户自定义字段'].map((field: any) => {
+                                      // 从 {{custom_fields.field_name}} 中提取字段名
+                                      const fieldKey = field.value.replace('{{', '').replace('}}', '');
+                                      return (
+                                        <option key={fieldKey} value={fieldKey}>
+                                          {field.label} ({fieldKey})
+                                        </option>
+                                      );
+                                    })}
+                                  </optgroup>
+                                )}
+                              </select>
+                              {field.output_key && (
+                                <div style={{ fontSize: '11px', color: '#666', marginTop: '4px' }}>
+                                  选中字段: <strong>{field.field_name || field.output_key}</strong>
+          </div>
+      )}
+                            </div>
+
+                            <div style={{ marginBottom: '12px' }}>
+                              <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                                🔢 数据类型
+                              </label>
+                              <select
+                                value={field.data_type}
+                                onChange={(e) => updateField(field.id, { data_type: e.target.value })}
+                                style={{ width: '100%' }}
+                              >
+                                <option value="string">📝 文本 (string)</option>
+                                <option value="number">🔢 数字 (number)</option>
+                                <option value="date">📅 日期 (date)</option>
+                                <option value="boolean">✅ 布尔值 (boolean)</option>
+                                <option value="array">📚 数组 (array)</option>
+                                <option value="object">📋 对象 (object)</option>
+                              </select>
+                            </div>
+
+                            <div style={{ marginBottom: '12px' }}>
+                              <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                                📝 分析说明 (告诉 AI 如何处理这个字段)
+                              </label>
+                              <textarea
+                                value={field.description}
+                                onChange={(e) => updateField(field.id, { description: e.target.value })}
+                                placeholder={`例如: 分析客户预算信息：
+- 提取金额数字
+- 万元自动转换 (800万→8000000)
+- 范围取最大值 (800-1000万→1000万)
+- 没有预算信息输出 null`}
+                                rows={4}
+                                style={{ width: '100%', fontFamily: 'inherit' }}
+                              />
+        </div>
+
+                            <div>
+                              <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                                💡 输出示例 (给 AI 参考)
+                              </label>
+        <input
+                                type="text"
+                                value={field.example}
+                                onChange={(e) => updateField(field.id, { example: e.target.value })}
+                                placeholder="例如: 8000000, 2025-03-01, true"
+                                style={{ width: '100%' }}
+                              />
+        </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+      </div>
+
+                  {updateFields.length > 0 && (
+      <div className="config-field">
+                      <div style={{ 
+                        padding: '12px', 
+                        background: '#f0f9ff', 
+                        borderRadius: '8px',
+                        border: '1px solid #0ea5e9'
+                      }}>
+                        <div style={{ fontSize: '12px', color: '#0369a1', marginBottom: '8px', fontWeight: '600' }}>
+                          🔍 预览生成的 Prompt 指令
+                        </div>
+                        <div style={{ 
+                          fontSize: '11px', 
+                          color: '#475569',
+                          fontFamily: 'monospace',
+                          background: 'white',
+                          padding: '8px',
+                          borderRadius: '4px',
+                          maxHeight: '120px',
+                          overflow: 'auto'
+                        }}>
+                          请分析客户消息并提取以下信息：<br/>
+                          {updateFields.filter((f: any) => f.enabled).map((field: any, index: number) => (
+                            <span key={field.id}>
+                              {index + 1}. {field.output_key} ({field.field_name}):<br/>
+                              &nbsp;&nbsp;{field.description || '(未设置说明)'}<br/>
+                              &nbsp;&nbsp;数据类型: {field.data_type}<br/>
+                              {field.example && (
+                                <>
+                                  &nbsp;&nbsp;示例: {field.example}<br/>
+                                </>
+                              )}
+                              <br/>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 消息回复配置 */}
+        <div className="config-section">
+          <div 
+            className="section-header"
+            onClick={() => toggleSection('messageReply')}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              background: 'linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: expandedSections.messageReply ? '16px' : '8px',
+              border: '1px solid #22c55e'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '16px' }}>💬</span>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>消息回复配置</h3>
+              <span style={{ 
+                fontSize: '12px', 
+                color: '#15803d',
+                background: '#dcfce7',
+                padding: '2px 8px',
+                borderRadius: '12px'
+              }}>
+                {localData.enable_auto_reply ? '已启用' : '已禁用'}
+              </span>
+            </div>
+            <span style={{ fontSize: '14px', color: '#666' }}>
+              {expandedSections.messageReply ? '🔽' : '▶️'}
+            </span>
+          </div>
+
+          {expandedSections.messageReply && (
+            <div className="section-content" style={{ marginBottom: '16px' }}>
+              <div className="config-field">
+                <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+        <input
+                    type="checkbox"
+                    checked={localData.enable_auto_reply || false}
+                    onChange={(e) => updateNodeData({ enable_auto_reply: e.target.checked })}
+                    style={{ marginRight: '8px' }}
+                  />
+                  启用自动回复功能
+                </label>
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  让 AI 生成回复消息发送给客户
+                </div>
+      </div>
+
+              {localData.enable_auto_reply && (
+                <>
+      <div className="config-field">
+                    <label>📏 回复长度限制</label>
+        <input
+          type="number"
+                      min="50"
+                      max="2000"
+                      value={localData.reply_max_length || 700}
+                      onChange={(e) => updateNodeData({ reply_max_length: parseInt(e.target.value) })}
         />
         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          当 AI 的 `confidence` 低于此阈值时，自动触发 Handoff 分支
+                      AI 生成回复的最大字符数
         </div>
       </div>
 
       <div className="config-field">
-        <label>媒体发送设置</label>
+                    <label>🎨 回复风格</label>
+                    <select
+                      value={localData.reply_style || 'professional'}
+                      onChange={(e) => updateNodeData({ reply_style: e.target.value })}
+                    >
+                      <option value="professional">🤵 专业正式</option>
+                      <option value="friendly">😊 友好亲切</option>
+                      <option value="casual">😎 轻松随意</option>
+                      <option value="enthusiastic">🎉 热情积极</option>
+                    </select>
+                  </div>
+
+                  <div className="config-field">
+                    <label>📱 媒体发送设置</label>
         <div style={{ marginTop: '8px' }}>
           <div style={{ marginBottom: '8px' }}>
             <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
@@ -525,9 +1168,6 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               />
               媒体与文本分开发送
             </label>
-            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
-              勾选后，媒体文件将单独发送，不附带文本消息
-            </div>
           </div>
           
           <div style={{ marginBottom: '8px' }}>
@@ -546,9 +1186,6 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               />
               媒体附带文本说明
             </label>
-            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
-              媒体文件将与 AI 生成的回复文本一起发送
-            </div>
           </div>
 
           <div>
@@ -566,9 +1203,6 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               />
               媒体间延迟发送
             </label>
-            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
-              发送多个媒体文件时，在每个文件之间添加延迟
-            </div>
             {localData.media_settings?.delay_between_media && (
               <div style={{ marginLeft: '24px', marginTop: '8px' }}>
                 <label style={{ fontSize: '12px', color: '#666' }}>延迟时间（秒）:</label>
@@ -589,254 +1223,239 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             )}
           </div>
         </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
       </div>
 
+        {/* Handoff 配置 */}
+        <div className="config-section">
+          <div 
+            className="section-header"
+            onClick={() => toggleSection('handoff')}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              background: 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: expandedSections.handoff ? '16px' : '8px',
+              border: '1px solid #f59e0b'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '16px' }}>🤝</span>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>Handoff 配置</h3>
+              <span style={{ 
+                fontSize: '12px', 
+                color: '#92400e',
+                background: '#fde68a',
+                padding: '2px 8px',
+                borderRadius: '12px'
+              }}>
+                {localData.enable_handoff ? `阈值 ${localData.handoff_threshold || 0.6}` : '已禁用'}
+              </span>
+            </div>
+            <span style={{ fontSize: '14px', color: '#666' }}>
+              {expandedSections.handoff ? '🔽' : '▶️'}
+            </span>
+          </div>
 
-      {/* 聊天历史配置 */}
+          {expandedSections.handoff && (
+            <div className="section-content" style={{ marginBottom: '16px' }}>
       <div className="config-field">
-        <label>聊天历史设置</label>
-        <div style={{ marginTop: '8px' }}>
-          <div style={{ marginBottom: '8px' }}>
             <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
               <input
                 type="checkbox"
-                checked={localData.chat_history?.enabled || false}
-                onChange={(e) => updateNodeData({
-                  chat_history: {
-                    ...localData.chat_history,
-                    enabled: e.target.checked
-                  }
-                })}
+                    checked={localData.enable_handoff || false}
+                    onChange={(e) => updateNodeData({ enable_handoff: e.target.checked })}
                 style={{ marginRight: '8px' }}
               />
-              启用聊天历史
-              <span style={{ fontSize: '16px', cursor: 'help', marginLeft: '8px' }} title="将客户的聊天历史记录传递给 AI，帮助 AI 更好地理解上下文">
-                ℹ️
-              </span>
+                  启用 Handoff 功能
             </label>
-            <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
-              将客户的聊天历史记录传递给 AI，帮助 AI 更好地理解上下文
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  当 AI 置信度低时自动转接人工处理
             </div>
           </div>
 
-          {localData.chat_history?.enabled && (
-            <>
-              <div style={{ marginBottom: '8px', marginLeft: '24px' }}>
-                <label style={{ fontSize: '12px', color: '#666' }}>历史记录条数:</label>
+              {localData.enable_handoff && (
+                <div className="config-field">
+                  <label>🎯 置信度阈值 (0-1)</label>
                 <input
                   type="number"
-                  min="1"
-                  max="50"
-                  value={localData.chat_history?.message_count || 10}
-                  onChange={(e) => updateNodeData({
-                    chat_history: {
-                      ...localData.chat_history,
-                      message_count: parseInt(e.target.value)
-                    }
-                  })}
-                  style={{ width: '80px', marginLeft: '8px' }}
-                />
-                <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
-                  获取最近的 N 条聊天记录（包括客户和 AI 的消息）
-                </div>
-              </div>
-
-              <div style={{ marginBottom: '8px', marginLeft: '24px' }}>
-                <label style={{ display: 'flex', alignItems: 'center', fontSize: '12px' }}>
-                  <input
-                    type="checkbox"
-                    checked={localData.chat_history?.include_timestamps || false}
-                    onChange={(e) => updateNodeData({
-                      chat_history: {
-                        ...localData.chat_history,
-                        include_timestamps: e.target.checked
-                      }
-                    })}
-                    style={{ marginRight: '8px' }}
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={localData.handoff_threshold ?? 0.6}
+                    onChange={(e) => updateNodeData({ handoff_threshold: parseFloat(e.target.value) })}
                   />
-                  包含时间戳
-                </label>
-                <div style={{ fontSize: '11px', color: '#999', marginTop: '2px' }}>
-                  在聊天历史中包含消息的发送时间
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                    当 AI 置信度低于此值时触发 Handoff 分支
                 </div>
-              </div>
-
-              <div style={{ marginLeft: '24px' }}>
-                <label style={{ fontSize: '12px', color: '#666' }}>历史记录格式预览:</label>
                 <div style={{ 
+                    fontSize: '11px', 
+                    color: '#0369a1',
+                    background: '#f0f9ff',
                   padding: '8px', 
-                  backgroundColor: '#f8f9fa', 
                   borderRadius: '4px',
-                  fontSize: '11px',
-                  fontFamily: 'monospace',
-                  color: '#495057',
-                  marginTop: '4px'
-                }}>
-                  {localData.chat_history?.include_timestamps ? (
-                    <>
-                      [2024-10-14 10:30] 客户: 你好，我想了解一下房价<br/>
-                      [2024-10-14 10:31] AI: 您好！我很乐意为您介绍...<br/>
-                      [2024-10-14 10:32] 客户: 有什么优惠吗？
-                    </>
-                  ) : (
-                    <>
-                      客户: 你好，我想了解一下房价<br/>
-                      AI: 您好！我很乐意为您介绍...<br/>
-                      客户: 有什么优惠吗？
-                    </>
-                  )}
+                    marginTop: '8px'
+                  }}>
+                    💡 提示：Handoff 触发后会走 "true" 分支，连接到下一个处理节点
                 </div>
               </div>
-            </>
           )}
         </div>
+          )}
       </div>
 
-      <div className="config-field">
-        <label>AI 节点行为</label>
-        <div style={{ display: 'grid', gap: 8 }}>
-          <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={localData.enableUpdateInfo ?? false}
-                onChange={(e) => updateNodeData({ enableUpdateInfo: e.target.checked })}
-              />
-              <span className="slider" />
-            </label>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              <div style={{ fontWeight: 600 }}>允许更新客户信息</div>
-              <div style={{ fontSize: 12, color: '#666' }}>开启时可选择客户表头让 LLM 更新</div>
+        {/* 高级选项 */}
+        <div className="config-section">
+          <div 
+            className="section-header"
+            onClick={() => toggleSection('advanced')}
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 16px',
+              background: 'linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              marginBottom: expandedSections.advanced ? '16px' : '8px',
+              border: '1px solid #9ca3af'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '16px' }}>🔧</span>
+              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>高级选项</h3>
+              <span style={{ 
+                fontSize: '12px', 
+                color: '#4b5563',
+                background: '#e5e7eb',
+                padding: '2px 8px',
+                borderRadius: '12px'
+              }}>
+                可选配置
+              </span>
             </div>
-
-            <div style={{ width: 24 }} />
-
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={localData.enableAutoReply ?? false}
-                onChange={(e) => updateNodeData({ enableAutoReply: e.target.checked })}
-              />
-              <span className="slider" />
-            </label>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              <div style={{ fontWeight: 600 }}>自动回复</div>
-              <div style={{ fontSize: 12, color: '#666' }}>开启时 LLM 会生成回复文本</div>
-            </div>
+            <span style={{ fontSize: '14px', color: '#666' }}>
+              {expandedSections.advanced ? '🔽' : '▶️'}
+            </span>
           </div>
 
-          { (localData.enableUpdateInfo ?? false) ? (
-            <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>可选更新的表头</div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <button
-                  className="small-action-button"
-                  onClick={() => {
-                    // 打开面板时动态加载字段（从用户配置或 /customers/fields）
-                    setShowHeadersPanel(v => {
-                      const next = !v
-                      if (next) fetchAvailableHeaders()
-                      return next
-                    })
-                  }}
-                  style={{ padding: '8px 10px' }}
-                >
-                  {showHeadersPanel ? '隐藏表头选择' : '选择表头'}
-                </button>
-                <div style={{ color: '#666', fontSize: 13 }}>
-                  已选: {(localData.selectedHeaders || []).join(', ') || '无'}
+          {expandedSections.advanced && (
+            <div className="section-content" style={{ marginBottom: '16px' }}>
+              <div className="config-field">
+                <label>🔄 重试设置</label>
+                <div style={{ marginBottom: '12px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                    <input
+                      type="checkbox"
+                      checked={localData.enable_retry !== false} // 默认启用
+                      onChange={(e) => updateNodeData({ enable_retry: e.target.checked })}
+                      style={{ marginRight: '8px' }}
+                    />
+                    启用重试机制
+                  </label>
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                    当 AI 请求失败时自动重试
+                  </div>
+                </div>
+
+                {localData.enable_retry !== false && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginLeft: '24px' }}>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#666' }}>最大重试次数</label>
+                <input
+                        type="number"
+                        min="0"
+                        max="5"
+                        value={localData.max_retries || 3}
+                        onChange={(e) => updateNodeData({ max_retries: parseInt(e.target.value) })}
+                      />
+              </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#666' }}>重试间隔（秒）</label>
+                <input
+                        type="number"
+                        min="1"
+                        max="60"
+                        value={localData.retry_delay || 5}
+                        onChange={(e) => updateNodeData({ retry_delay: parseInt(e.target.value) })}
+                      />
+              </div>
+                  </div>
+                )}
+
+                {/* 重试设置说明 */}
+                <div style={{ 
+                  background: '#fef3c7', 
+                  padding: '10px', 
+                  borderRadius: '6px',
+                  border: '1px solid #fbbf24',
+                  marginTop: '12px'
+                }}>
+                  <div style={{ fontSize: '12px', color: '#92400e', fontWeight: '600', marginBottom: '4px' }}>
+                    💡 重试机制说明:
+                  </div>
+                  <div style={{ fontSize: '11px', color: '#78350f', lineHeight: '1.4' }}>
+                    • 启用时：网络错误或API限流时会自动重试<br/>
+                    • 禁用时：失败后立即返回错误，不进行重试<br/>
+                    • 重试次数为0时等同于禁用重试
+                  </div>
                 </div>
               </div>
 
-            {showHeadersPanel && (
-              <div style={{ marginTop: 10, padding: 12, borderRadius: 8, background: 'linear-gradient(180deg, #fff, #fbfdff)', boxShadow: '0 6px 18px rgba(11,37,69,0.03)' }}>
-                {loadingHeaders ? (
-                  <div style={{ color: '#666' }}>加载字段中...</div>
-                ) : headerList.length === 0 ? (
-                  <div style={{ color: '#666' }}>
-                    未找到可用字段。请确认已登录并且客户数据存在。<button onClick={() => { fetchAvailableHeaders() }} style={{ marginLeft: 8 }}>刷新</button>
-                  </div>
-                ) : (
-                  headerList.map((h: string) => {
-                    const selected = (localData.selectedHeaders || []).includes(h)
-                    return (
-                      <label key={h} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 8, marginBottom: 8 }}>
-                        <label className="switch" style={{ marginRight: 6 }}>
+              <div className="config-field">
+                <label>📝 日志与调试</label>
+                <div style={{ marginTop: '8px' }}>
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
                           <input
                             type="checkbox"
-                            checked={selected}
-                            onChange={() => {
-                              const prev = localData.selectedHeaders || []
-                              let next = [...prev]
-                              if (!selected) next.push(h)
-                              else next = next.filter((x: string) => x !== h)
-                              updateNodeData({ selectedHeaders: next })
-                            }}
-                          />
-                          <span className="slider" />
+                        checked={localData.save_raw_response || false}
+                        onChange={(e) => updateNodeData({ save_raw_response: e.target.checked })}
+                        style={{ marginRight: '8px' }}
+                      />
+                      保存原始 AI 响应
                         </label>
-                        <span style={{ fontSize: 13 }}>{h}</span>
-                      </label>
-                    )
-                  })
-                )}
               </div>
-            )}
-            </div>
-          ) : (
-            <div style={{ fontSize: 13, color: '#777', marginTop: 16 }}>开启 "允许更新客户信息" 后可选择要允许 LLM 更新的表头。</div>
-          )}
-
-          {/* 必填字段输入已移除（由 LLM 输出和工作流逻辑控制） */}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            {/* 备份模型与重试次数已移除 */}
+                  
+                  <div style={{ marginBottom: '8px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                      <input
+                        type="checkbox"
+                        checked={localData.enable_debug_logs || false}
+                        onChange={(e) => updateNodeData({ enable_debug_logs: e.target.checked })}
+                        style={{ marginRight: '8px' }}
+                      />
+                      启用详细调试日志
+                    </label>
           </div>
 
-          <div style={{ display: 'flex', gap: 8 }}>
-            {/* JSON 修复与保存原始响应选项已移除 */}
-          </div>
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            {/* 执行成功/失败路由选项已移除 */}
-          </div>
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>Handoff 配置</label>
-        <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 12 }}>
-          <label className="switch">
+                  <div>
+                    <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
             <input
               type="checkbox"
-              checked={localData.enableHandoff ?? false}
-              onChange={(e) => updateNodeData({ enableHandoff: e.target.checked })} />
-            <span className="slider" />
+                        checked={localData.auto_fix_json || true}
+                        onChange={(e) => updateNodeData({ auto_fix_json: e.target.checked })}
+                        style={{ marginRight: '8px' }}
+                      />
+                      自动修复 JSON 格式错误
           </label>
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
-            <div style={{ fontWeight: 600 }}>开启 Handoff</div>
-            <div style={{ fontSize: 12, color: '#666' }}>当 AI 置信度低时自动转人工</div>
           </div>
         </div>
-
-        { localData.enableHandoff && (
-          <div className="config-field" style={{ marginTop: 16 }}>
-            <label>Handoff 置信度阈值 (0-1)</label>
-            <input
-              type="number"
-              min="0"
-              max="1"
-              step="0.01"
-              value={localData.handoff_threshold ?? 0.6}
-              onChange={(e) => updateNodeData({ handoff_threshold: parseFloat(e.target.value) })} />
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-              当 AI 的 `confidence` 低于此阈值时，自动触发 Handoff 分支
             </div>
           </div>
         )}
       </div>
     </>
   )
+  }
 
   const renderHandoffConfig = () => (
     <>
@@ -964,40 +1583,360 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     </>
   )
 
-  const renderUpdateDBConfig = () => (
-    <>
+  const renderUpdateDBConfig = () => {
+    // 硬性更新字段管理
+    const staticUpdates = localData.static_updates || []
+
+    const addStaticUpdate = () => {
+      const newUpdates = [...staticUpdates, {
+        id: uuidv4(),
+        db_field: '',
+        value: '',
+        data_type: 'string',
+        enabled: true
+      }]
+      updateNodeData({ static_updates: newUpdates })
+    }
+
+    const removeStaticUpdate = (id: string) => {
+      const newUpdates = staticUpdates.filter((u: any) => u.id !== id)
+      updateNodeData({ static_updates: newUpdates })
+    }
+
+    const updateStaticUpdate = (id: string, updates: any) => {
+      const newUpdates = staticUpdates.map((u: any) => 
+        u.id === id ? { ...u, ...updates } : u
+      )
+      updateNodeData({ static_updates: newUpdates })
+    }
+
+    return (
+      <>
+        {/* 更新模式配置 */}
       <div className="config-field">
-        <label>表名</label>
+          <label>🎯 更新模式</label>
         <select
-          value={localData.table || 'customers'}
-          onChange={(e) => updateNodeData({ table: e.target.value })}
-        >
-          <option value="customers">客户表</option>
-          <option value="messages">消息表</option>
-          <option value="tasks">任务表</option>
+            value={localData.update_mode || 'smart_update'}
+            onChange={(e) => updateNodeData({ update_mode: e.target.value })}
+          >
+            <option value="smart_update">🤖 智能更新 (自动检测 AI 输出)</option>
+            <option value="static_update">⚙️ 硬性更新 (固定字段更新)</option>
+            <option value="hybrid">🔄 混合模式 (智能 + 硬性)</option>
         </select>
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            智能更新：自动处理 AI 节点输出的 updates 字段
       </div>
+        </div>
+
+        {/* 目标配置说明 */}
       <div className="config-field">
-        <label>匹配字段</label>
-        <select
-          value={localData.match_key || 'phone'}
-          onChange={(e) => updateNodeData({ match_key: e.target.value })}
-        >
-          <option value="phone">手机号</option>
-          <option value="email">邮箱</option>
-          <option value="id">ID</option>
-        </select>
-      </div>
+          <div style={{ 
+            padding: '12px', 
+            background: '#f8fafc', 
+            borderRadius: '8px',
+            border: '1px solid #e2e8f0'
+          }}>
+            <div style={{ fontSize: '14px', color: '#374151', marginBottom: '8px', fontWeight: '600' }}>
+              🎯 更新目标：客户表 (customers)
+            </div>
+            <div style={{ fontSize: '12px', color: '#6b7280' }}>
+              • 自动根据触发器类型匹配客户记录<br/>
+              • WhatsApp 消息：使用手机号匹配<br/>
+              • Telegram 消息：使用聊天ID匹配<br/>
+              • 其他触发器：使用客户ID匹配
+            </div>
+          </div>
+        </div>
+
+        {/* 智能更新说明 */}
+        {(localData.update_mode === 'smart_update' || localData.update_mode === 'hybrid') && (
       <div className="config-field">
-        <label>乐观锁</label>
+            <div style={{ 
+              padding: '12px', 
+              background: '#f0f9ff', 
+              borderRadius: '8px',
+              border: '1px solid #0ea5e9'
+            }}>
+              <div style={{ fontSize: '14px', color: '#0369a1', marginBottom: '8px', fontWeight: '600' }}>
+                🤖 智能更新模式
+              </div>
+              <div style={{ fontSize: '12px', color: '#475569' }}>
+                • 自动检测 AI 节点输出的 <code>ai.analyze.updates</code> 字段<br/>
+                • 根据字段名直接更新对应的数据库字段<br/>
+                • 支持基础字段 (name, phone, email) 和自定义字段 (custom_fields.xxx)<br/>
+                • 无需手动配置字段映射，AI 节点负责输出正确的字段名
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 硬性更新配置 */}
+        {(localData.update_mode === 'static_update' || localData.update_mode === 'hybrid') && (
+          <div className="config-field">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <label>⚙️ 硬性更新配置</label>
+              <button
+                type="button"
+                onClick={addStaticUpdate}
+                className="small-action-button primary"
+                style={{ fontSize: '12px', padding: '6px 12px' }}
+              >
+                + 添加字段
+              </button>
+            </div>
+            
+            <div style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
+              配置固定的字段更新值（不依赖 AI 分析）
+            </div>
+
+            {staticUpdates.length === 0 ? (
+              <div style={{ 
+                padding: '16px', 
+                textAlign: 'center', 
+                color: '#666', 
+                border: '2px dashed #ddd', 
+                borderRadius: '8px',
+                background: '#f9f9f9'
+              }}>
+                点击"添加字段"配置硬性更新
+              </div>
+            ) : (
+              <div className="static-updates-list">
+                {staticUpdates.map((update: any, index: number) => (
+                  <div key={update.id} className="static-update-item" style={{
+                    padding: '16px',
+                    border: '1px solid #e2e8f0',
+                    borderRadius: '8px',
+                    marginBottom: '12px',
+                    background: update.enabled ? '#ffffff' : '#f8f9fa'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                      <h4 style={{ margin: 0, fontSize: '14px', fontWeight: '600' }}>
+                        更新字段 #{index + 1}
+                      </h4>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', fontSize: '12px' }}>
         <input
           type="checkbox"
-          checked={localData.optimistic_lock}
+                            checked={update.enabled}
+                            onChange={(e) => updateStaticUpdate(update.id, { enabled: e.target.checked })}
+                            style={{ marginRight: '4px' }}
+                          />
+                          启用
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => removeStaticUpdate(update.id)}
+                          className="small-action-button"
+                          style={{ 
+                            background: '#ef4444',
+                            color: 'white',
+                            fontSize: '12px',
+                            padding: '4px 8px'
+                          }}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom: '12px' }}>
+                      <div style={{ marginBottom: '8px' }}>
+                        <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                          🎯 数据库字段
+                        </label>
+                        <select
+                          value={update.db_field}
+                          onChange={(e) => {
+                            const selectedField = e.target.value;
+                            // 从 availableVariables 中查找对应的字段信息
+                            let fieldLabel = selectedField;
+                            
+                            // 查找基础字段
+                            const basicField = availableVariables['客户基础信息']?.find((f: any) => f.value === `{{db.customer.${selectedField}}}`);
+                            if (basicField) {
+                              fieldLabel = basicField.label;
+                            } else {
+                              // 查找自定义字段
+                              const customField = availableVariables['客户自定义字段']?.find((f: any) => f.value === `{{${selectedField}}}`);
+                              if (customField) {
+                                fieldLabel = customField.label;
+                              }
+                            }
+                            
+                            updateStaticUpdate(update.id, { 
+                              db_field: selectedField,
+                              field_label: fieldLabel
+                            });
+                          }}
+                          style={{ width: '100%' }}
+                        >
+                          <option value="">选择字段...</option>
+                          {availableVariables['客户基础信息'] && availableVariables['客户基础信息'].length > 0 && (
+                            <optgroup label="基础字段">
+                              {availableVariables['客户基础信息'].map((field: any) => {
+                                // 从 {{db.customer.field_name}} 中提取字段名
+                                const fieldKey = field.value.replace('{{db.customer.', '').replace('}}', '');
+                                return (
+                                  <option key={fieldKey} value={fieldKey}>
+                                    {field.label} ({fieldKey})
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          )}
+                          {availableVariables['客户自定义字段'] && availableVariables['客户自定义字段'].length > 0 && (
+                            <optgroup label="自定义字段">
+                              {availableVariables['客户自定义字段'].map((field: any) => {
+                                // 从 {{custom_fields.field_name}} 中提取字段名
+                                const fieldKey = field.value.replace('{{', '').replace('}}', '');
+                                return (
+                                  <option key={fieldKey} value={fieldKey}>
+                                    {field.label} ({fieldKey})
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          )}
+                        </select>
+                        {update.db_field && (
+                          <div style={{ fontSize: '11px', color: '#666', marginTop: '4px' }}>
+                            选中字段: <strong>{update.field_label || update.db_field}</strong>
+                          </div>
+                        )}
+                      </div>
+                      
+                      <div>
+                        <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                          💡 更新值
+                        </label>
+                        <div style={{ position: 'relative' }}>
+                          <textarea
+                            value={update.value}
+                            onChange={(e) => updateStaticUpdate(update.id, { value: e.target.value })}
+                            placeholder="输入固定值或使用变量，支持多行文本"
+                            rows={2}
+                            style={{ 
+                              width: '100%', 
+                              paddingRight: '40px',
+                              resize: 'vertical',
+                              minHeight: '60px'
+                            }}
+                          />
+                          <button
+                            onClick={(e) => openVariableSelector(e, `static_${update.id}`)}
+                            style={{
+                              position: 'absolute',
+                              right: '8px',
+                              top: '8px',
+                              background: '#3b82f6',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '4px',
+                              padding: '4px 8px',
+                              fontSize: '12px',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            @变量
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                        数据类型
+                      </label>
+                      <select
+                        value={update.data_type}
+                        onChange={(e) => updateStaticUpdate(update.id, { data_type: e.target.value })}
+                        style={{ width: '100%' }}
+                      >
+                        <option value="string">📝 文本</option>
+                        <option value="number">🔢 数字</option>
+                        <option value="date">📅 日期</option>
+                        <option value="boolean">✅ 布尔值</option>
+                        <option value="current_timestamp">⏰ 当前时间戳</option>
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 安全与一致性选项 */}
+      <div className="config-field">
+          <label>🔒 数据安全与一致性</label>
+          <div style={{ marginTop: '8px' }}>
+            <div style={{ marginBottom: '8px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+        <input
+          type="checkbox"
+                  checked={localData.optimistic_lock || false}
           onChange={(e) => updateNodeData({ optimistic_lock: e.target.checked })}
-        />
+                  style={{ marginRight: '8px' }}
+                />
+                启用乐观锁
+              </label>
+              <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+                防止并发更新冲突，确保数据一致性
+              </div>
+            </div>
+            
+            <div style={{ marginBottom: '8px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                <input
+                  type="checkbox"
+                  checked={localData.skip_if_equal || true}
+                  onChange={(e) => updateNodeData({ skip_if_equal: e.target.checked })}
+                  style={{ marginRight: '8px' }}
+                />
+                跳过相同值更新
+              </label>
+              <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+                如果新值与当前值相同，则跳过更新操作
+              </div>
+            </div>
+
+            <div>
+              <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                <input
+                  type="checkbox"
+                  checked={localData.audit_log || true}
+                  onChange={(e) => updateNodeData({ audit_log: e.target.checked })}
+                  style={{ marginRight: '8px' }}
+                />
+                记录审计日志
+              </label>
+              <div style={{ fontSize: '12px', color: '#666', marginLeft: '24px' }}>
+                记录所有数据库更新操作，便于追踪和审计
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 错误处理 */}
+        <div className="config-field">
+          <label>⚠️ 错误处理策略</label>
+          <select
+            value={localData.error_strategy || 'log_and_continue'}
+            onChange={(e) => updateNodeData({ error_strategy: e.target.value })}
+          >
+            <option value="log_and_continue">📝 记录错误并继续</option>
+            <option value="abort_on_error">🛑 遇到错误时中止</option>
+            <option value="rollback_on_error">↩️ 遇到错误时回滚</option>
+            <option value="skip_invalid_fields">⏭️ 跳过无效字段</option>
+          </select>
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            选择当更新过程中遇到错误时的处理方式
+          </div>
       </div>
     </>
   )
+  }
 
   const renderDelayConfig = () => (
     <>
@@ -1072,60 +2011,192 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const renderSendMessageConfig = () => (
     <>
       <div className="config-field">
-        <label>发送渠道</label>
+        <label>📤 发送模式</label>
         <select
-          value={localData.channel || 'whatsapp'}
-          onChange={(e) => updateNodeData({ channel: e.target.value, send_mode: '' })} // 重置 send_mode
+          value={localData.send_mode || 'smart_reply'}
+          onChange={(e) => {
+            const mode = e.target.value;
+            if (mode === 'smart_reply') {
+              updateNodeData({ 
+                send_mode: 'smart_reply', 
+                channel: undefined, 
+                to_number: undefined,
+                telegram_chat_id: undefined,
+                number_source: undefined
+              })
+            } else if (mode === 'force_whatsapp') {
+              updateNodeData({ 
+                send_mode: 'force_whatsapp', 
+                channel: 'whatsapp',
+                number_source: 'trigger_number',
+                telegram_chat_id: undefined
+              })
+            } else if (mode === 'force_telegram') {
+              updateNodeData({ 
+                send_mode: 'force_telegram', 
+                channel: 'telegram',
+                number_source: 'trigger_number',
+                to_number: undefined
+              })
+            }
+          }}
         >
-          <option value="whatsapp">WhatsApp</option>
-          <option value="telegram">Telegram</option>
+          <option value="smart_reply">🎯 智能回复（自动检测平台）</option>
+          <option value="force_whatsapp">📱 强制发送到 WhatsApp</option>
+          <option value="force_telegram">✈️ 强制发送到 Telegram</option>
         </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          💡 智能回复会根据客户发消息的平台自动选择 WhatsApp 或 Telegram
+        </div>
       </div>
 
-      <div className="config-field">
-        <label>发送模式</label>
-        <select
-          value={localData.send_mode || 'trigger_number'}
-          onChange={(e) => updateNodeData({ send_mode: e.target.value })}
-        >
-          <option value="trigger_number">原触发号码发送</option>
-          {localData.channel === 'whatsapp' && (
-            <option value="specified_number">指定号码 (WhatsApp)</option>
-          )}
-          {localData.channel === 'telegram' && (
-            <option value="telegram_chat_id">Telegram Chat ID</option>
-          )}
-        </select>
-      </div>
-
-      {(localData.send_mode === 'specified_number' && localData.channel === 'whatsapp') && (
+      {/* 智能回复说明 */}
+      {localData.send_mode === 'smart_reply' && (
         <div className="config-field">
-          <label>指定 WhatsApp 号码</label>
-          <input
-            type="text"
-            value={localData.to_number || ''}
-            onChange={(e) => updateNodeData({ to_number: e.target.value })}
-            placeholder="例如: +85212345678"
-          />
+          <div style={{ 
+            background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)', 
+            padding: '16px', 
+            borderRadius: '12px',
+            border: '1px solid #0ea5e9'
+          }}>
+            <div style={{ fontSize: '14px', color: '#0369a1', marginBottom: '8px', fontWeight: '600' }}>
+              🎯 智能回复工作原理
+            </div>
+            <div style={{ fontSize: '12px', color: '#475569', lineHeight: '1.5' }}>
+              • <strong>WhatsApp 消息</strong>：自动使用客户的电话号码 (trigger.phone) 发送回复<br/>
+              • <strong>Telegram 消息</strong>：自动使用客户的 Chat ID (trigger.chat_id) 发送回复<br/>
+              • <strong>平台检测</strong>：根据触发器类型自动识别消息来源平台<br/>
+              • <strong>无需配置</strong>：系统会自动处理所有的路由和标识符匹配
+            </div>
+          </div>
         </div>
       )}
 
-      {(localData.send_mode === 'telegram_chat_id' && localData.channel === 'telegram') && (
+      {/* WhatsApp 强制发送配置 */}
+      {localData.send_mode === 'force_whatsapp' && (
         <div className="config-field">
-          <label>Telegram Chat ID</label>
-          <input
-            type="text"
-            value={localData.telegram_chat_id || ''}
-            onChange={(e) => updateNodeData({ telegram_chat_id: e.target.value })}
-            placeholder="例如: 123456789 (私聊) 或 @channel_name (频道)"
-          />
-          <label style={{marginTop: '10px'}}>Telegram Bot API Token</label>
-          <input
-            type="text"
-            value={localData.telegram_bot_token || ''}
-            onChange={(e) => updateNodeData({ telegram_bot_token: e.target.value })}
-            placeholder="填写您的 Telegram Bot API Token"
-          />
+          <label>📱 WhatsApp 号码来源</label>
+          <select
+            value={localData.number_source || 'trigger_number'}
+            onChange={(e) => {
+              const source = e.target.value;
+              if (source === 'trigger_number') {
+                updateNodeData({ number_source: 'trigger_number', to_number: undefined })
+              } else {
+                updateNodeData({ number_source: 'custom_number' })
+              }
+            }}
+          >
+            <option value="trigger_number">🎯 使用触发号码（客户的号码）</option>
+            <option value="custom_number">✏️ 自定义号码</option>
+          </select>
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            选择使用客户的号码还是指定的号码
+          </div>
+
+          {localData.number_source === 'custom_number' && (
+            <div style={{ marginTop: '12px' }}>
+              <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                📞 自定义 WhatsApp 号码
+              </label>
+              <input
+                type="text"
+                value={localData.to_number || ''}
+                onChange={(e) => updateNodeData({ to_number: e.target.value })}
+                placeholder="例如: +85212345678"
+                style={{ 
+                  borderColor: (!localData.to_number || localData.to_number.trim() === '') ? '#ef4444' : '#e2e8f0'
+                }}
+              />
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                消息将发送到这个指定的 WhatsApp 号码
+              </div>
+              {(!localData.to_number || localData.to_number.trim() === '') && (
+                <div style={{ 
+                  fontSize: '12px', 
+                  color: '#ef4444', 
+                  marginTop: '4px',
+                  padding: '8px',
+                  background: '#fef2f2',
+                  borderRadius: '4px',
+                  border: '1px solid #fecaca'
+                }}>
+                  ⚠️ 请输入有效的 WhatsApp 号码，否则消息发送将失败
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Telegram 强制发送配置 */}
+      {localData.send_mode === 'force_telegram' && (
+        <div className="config-field">
+          <label>✈️ Telegram Chat ID 来源</label>
+          <select
+            value={localData.number_source || 'trigger_number'}
+            onChange={(e) => {
+              const source = e.target.value;
+              if (source === 'trigger_number') {
+                updateNodeData({ number_source: 'trigger_number', telegram_chat_id: undefined })
+              } else {
+                updateNodeData({ number_source: 'custom_number' })
+              }
+            }}
+          >
+            <option value="trigger_number">🎯 使用触发 Chat ID（客户的 Chat ID）</option>
+            <option value="custom_number">✏️ 自定义 Chat ID</option>
+          </select>
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            选择使用客户的 Chat ID 还是指定的 Chat ID
+          </div>
+
+          {localData.number_source === 'custom_number' && (
+            <div style={{ marginTop: '12px' }}>
+              <label style={{ fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block' }}>
+                💬 自定义 Telegram Chat ID
+              </label>
+              <input
+                type="text"
+                value={localData.telegram_chat_id || ''}
+                onChange={(e) => updateNodeData({ telegram_chat_id: e.target.value })}
+                placeholder="例如: 123456789 (私聊) 或 @channel_name (频道)"
+                style={{ 
+                  borderColor: (!localData.telegram_chat_id || localData.telegram_chat_id.trim() === '') ? '#ef4444' : '#e2e8f0'
+                }}
+              />
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                消息将发送到这个指定的 Telegram Chat ID
+              </div>
+              
+              <label style={{marginTop: '12px', fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block'}}>
+                🤖 Telegram Bot Token
+              </label>
+              <input
+                type="text"
+                value={localData.telegram_bot_token || ''}
+                onChange={(e) => updateNodeData({ telegram_bot_token: e.target.value })}
+                placeholder="填写您的 Telegram Bot API Token"
+              />
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                需要 Bot Token 才能发送消息到指定的 Chat ID
+              </div>
+
+              {(!localData.telegram_chat_id || localData.telegram_chat_id.trim() === '') && (
+                <div style={{ 
+                  fontSize: '12px', 
+                  color: '#ef4444', 
+                  marginTop: '4px',
+                  padding: '8px',
+                  background: '#fef2f2',
+                  borderRadius: '4px',
+                  border: '1px solid #fecaca'
+                }}>
+                  ⚠️ 请输入有效的 Telegram Chat ID，否则消息发送将失败
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1419,6 +2490,286 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     </>
   )
 
+  const renderCustomAPIConfig = () => {
+    
+    return (
+    <>
+      {/* 基础配置 */}
+      <div className="config-field">
+        <label>API 名称</label>
+        <input
+          type="text"
+          value={localData.name || ''}
+          onChange={(e) => updateNodeData({ name: e.target.value })}
+          placeholder="例如：获取天气信息、发送邮件通知"
+        />
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          给这个API调用起个容易识别的名字
+        </div>
+      </div>
+
+      <div className="config-field">
+        <label>请求方法</label>
+        <select
+          value={localData.method || 'GET'}
+          onChange={(e) => updateNodeData({ method: e.target.value })}
+        >
+          <option value="GET">🔍 GET - 获取数据</option>
+          <option value="POST">📤 POST - 发送数据</option>
+          <option value="PUT">✏️ PUT - 更新数据</option>
+          <option value="DELETE">🗑️ DELETE - 删除数据</option>
+        </select>
+      </div>
+
+      <div className="config-field">
+        <label>API 地址</label>
+        <div style={{ position: 'relative' }}>
+          <input
+            ref={(el) => { if (el) inputRefs.current['url'] = el; }}
+            type="text"
+            value={localData.url || ''}
+            onChange={(e) => updateNodeData({ url: e.target.value })}
+            onKeyDown={(e) => handleInputKeyDown(e, 'url')}
+            onSelect={(e) => handleInputSelect(e, 'url')}
+            placeholder="https://api.example.com/endpoint (输入 @ 选择变量)"
+            style={{ paddingRight: '60px' }}
+          />
+          <button
+            onClick={(e) => openVariableSelector(e, 'url')}
+            style={{
+              position: 'absolute',
+              right: '8px',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              background: '#3b82f6',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              padding: '4px 8px',
+              fontSize: '12px',
+              cursor: 'pointer'
+            }}
+          >
+            @变量
+          </button>
+        </div>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          💡 支持变量：{`{{trigger.phone}}`}、{`{{db.customer.name}}`} 等 | 输入 @ 快速选择
+        </div>
+      </div>
+
+      {/* 认证配置 */}
+      <div className="config-field">
+        <label>认证方式</label>
+        <select
+          value={localData.auth?.type || 'none'}
+          onChange={(e) => updateNodeData({ 
+            auth: { ...localData.auth, type: e.target.value }
+          })}
+        >
+          <option value="none">🚫 无需认证</option>
+          <option value="bearer">🔑 Bearer Token</option>
+          <option value="api_key">🗝️ API Key</option>
+          <option value="basic">👤 Basic Auth</option>
+        </select>
+      </div>
+
+      {/* 根据认证方式显示对应配置 */}
+      {localData.auth?.type === 'bearer' && (
+        <div className="config-field">
+          <label>Bearer Token</label>
+          <input
+            type="password"
+            value={localData.auth?.token || ''}
+            onChange={(e) => updateNodeData({ 
+              auth: { ...localData.auth, token: e.target.value }
+            })}
+            placeholder="输入你的 Bearer Token"
+          />
+        </div>
+      )}
+
+      {localData.auth?.type === 'api_key' && (
+        <>
+          <div className="config-field">
+            <label>API Key</label>
+            <input
+              type="password"
+              value={localData.auth?.api_key || ''}
+              onChange={(e) => updateNodeData({ 
+                auth: { ...localData.auth, api_key: e.target.value }
+              })}
+              placeholder="输入你的 API Key"
+            />
+          </div>
+          <div className="config-field">
+            <label>API Key Header 名称</label>
+            <input
+              type="text"
+              value={localData.auth?.api_key_header || 'X-API-Key'}
+              onChange={(e) => updateNodeData({ 
+                auth: { ...localData.auth, api_key_header: e.target.value }
+              })}
+              placeholder="X-API-Key"
+            />
+          </div>
+        </>
+      )}
+
+      {localData.auth?.type === 'basic' && (
+        <>
+          <div className="config-field">
+            <label>用户名</label>
+            <input
+              type="text"
+              value={localData.auth?.username || ''}
+              onChange={(e) => updateNodeData({ 
+                auth: { ...localData.auth, username: e.target.value }
+              })}
+              placeholder="输入用户名"
+            />
+          </div>
+          <div className="config-field">
+            <label>密码</label>
+            <input
+              type="password"
+              value={localData.auth?.password || ''}
+              onChange={(e) => updateNodeData({ 
+                auth: { ...localData.auth, password: e.target.value }
+              })}
+              placeholder="输入密码"
+            />
+          </div>
+        </>
+      )}
+
+      {/* 请求体配置（仅POST/PUT显示） */}
+      {(localData.method === 'POST' || localData.method === 'PUT') && (
+        <div className="config-field">
+          <label>请求体 (JSON)</label>
+          <div style={{ position: 'relative' }}>
+            <textarea
+              ref={(el) => { if (el) inputRefs.current['body'] = el; }}
+              value={localData.body || ''}
+              onChange={(e) => updateNodeData({ body: e.target.value })}
+              onKeyDown={(e) => handleInputKeyDown(e, 'body')}
+              onSelect={(e) => handleInputSelect(e, 'body')}
+              placeholder={`{
+  "name": "{{db.customer.name}}",
+  "phone": "{{trigger.phone}}",
+  "message": "{{trigger.message}}",
+  "user_id": "{{trigger.user_id}}"
+}
+
+提示：输入 @ 可快速选择变量`}
+              rows={8}
+              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+            />
+            <button
+              onClick={(e) => openVariableSelector(e, 'body')}
+              style={{
+                position: 'absolute',
+                right: '8px',
+                top: '8px',
+                background: '#3b82f6',
+                color: 'white',
+                border: 'none',
+                borderRadius: '4px',
+                padding: '4px 8px',
+                fontSize: '12px',
+                cursor: 'pointer'
+              }}
+            >
+              @变量
+            </button>
+          </div>
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            💡 JSON 格式 | 输入 @ 快速选择变量 | 点击 "@变量" 按钮浏览所有可用变量
+          </div>
+        </div>
+      )}
+
+      {/* 高级配置 */}
+      <div className="config-field">
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <input
+            type="checkbox"
+            checked={showAdvancedApiConfig}
+            onChange={(e) => setShowAdvancedApiConfig(e.target.checked)}
+          />
+          显示高级配置
+        </label>
+      </div>
+
+      {showAdvancedApiConfig && (
+        <>
+          <div className="config-field">
+            <label>超时时间 (秒)</label>
+            <input
+              type="number"
+              value={localData.timeout || 30}
+              onChange={(e) => updateNodeData({ timeout: parseInt(e.target.value) })}
+              min="5"
+              max="300"
+            />
+          </div>
+
+          <div className="config-field">
+            <label>重试次数</label>
+            <input
+              type="number"
+              value={localData.retry_count || 3}
+              onChange={(e) => updateNodeData({ retry_count: parseInt(e.target.value) })}
+              min="0"
+              max="5"
+            />
+          </div>
+
+          <div className="config-field">
+            <label>自定义请求头</label>
+            <textarea
+              value={localData.headers ? JSON.stringify(localData.headers, null, 2) : ''}
+              onChange={(e) => {
+                try {
+                  const headers = JSON.parse(e.target.value || '{}')
+                  updateNodeData({ headers })
+                } catch (err) {
+                  // 忽略JSON解析错误，用户还在输入
+                }
+              }}
+              placeholder={`{
+  "Content-Type": "application/json",
+  "X-User-ID": "{{trigger.user_id}}",
+  "X-Customer-Phone": "{{trigger.phone}}"
+}`}
+              rows={4}
+              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+            />
+          </div>
+
+          <div className="config-field">
+            <label>响应数据提取</label>
+            <input
+              type="text"
+              value={localData.response_mapping?.data_field || ''}
+              onChange={(e) => updateNodeData({ 
+                response_mapping: { 
+                  ...localData.response_mapping, 
+                  data_field: e.target.value 
+                }
+              })}
+              placeholder="data.result (提取响应中的特定字段)"
+            />
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              留空则保存完整响应，填写字段路径可提取特定数据
+            </div>
+          </div>
+        </>
+      )}
+    </>
+    )
+  }
+
   const renderConfigFields = () => {
     switch (node.type) {
       case 'MessageTrigger':
@@ -1433,8 +2784,11 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         return renderUpdateDBConfig()
       case 'Delay':
         return renderDelayConfig()
-      case 'SendWhatsAppMessage':
+      case 'SendMessage':
+      case 'SendWhatsAppMessage': // 兼容旧名称
         return renderSendMessageConfig()
+      case 'CustomAPI':
+        return renderCustomAPIConfig()
       case 'GuardrailValidator':
         return renderGuardrailConfig()
       case 'Condition':
@@ -1450,7 +2804,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
 
     const addCondition = () => {
       const newConditions = [...conditions, {
-        id: Date.now().toString(),
+        id: uuidv4(),
         field: '',
         operator: '==',
         value: '',
@@ -1809,22 +3163,69 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   }
 
   // 动态变量选项 - 从后端获取
-  const [availableVariables, setAvailableVariables] = useState<any>({
-    '触发器数据': [
-      { label: '发送者姓名', value: '{{trigger.name}}', description: '发送消息的用户姓名' },
-      { label: '发送者电话', value: '{{trigger.phone}}', description: '发送消息的用户电话号码' },
-      { label: '发送者邮箱', value: '{{trigger.email}}', description: '发送消息的用户邮箱' },
-      { label: '消息内容', value: '{{trigger.content}}', description: '用户发送的原始消息内容' },
-      { label: '消息类型', value: '{{trigger.message_type}}', description: '消息类型（文本/图片/视频等）' },
-      { label: '时间戳', value: '{{trigger.timestamp}}', description: '消息发送的时间' },
-      { label: '触发器ID', value: '{{trigger.id}}', description: '触发器的唯一标识' },
-      { label: '消息来源', value: '{{trigger.source}}', description: '消息来源平台（WhatsApp/Telegram等）' },
+  const [availableVariables, setAvailableVariables] = useState<any>(() => ({
+    '触发器信息': [
+      { label: '手机号', value: '{{trigger.phone}}', description: '触发消息的发送者手机号' },
+      { label: '聊天ID', value: '{{trigger.chat_id}}', description: 'Telegram 聊天ID' },
+      { label: '发送者姓名', value: '{{trigger.name}}', description: '触发消息的发送者姓名' },
+      { label: '消息内容', value: '{{trigger.message}}', description: '触发消息的文本内容' },
+      { label: '时间戳', value: '{{trigger.timestamp}}', description: '消息发送时间' },
+      { label: '用户ID', value: '{{trigger.user_id}}', description: '系统用户ID' },
     ],
-    '客户基础信息': [
-      { label: '所有客户信息', value: '{{customer.all}}', description: '包含所有客户基础和自定义字段的信息' },
+    'AI 输出': [
+      { label: 'AI 回复文本', value: '{{ai.reply.reply_text}}', description: 'AI 生成的回复内容' },
+      { label: 'AI 分析结果', value: '{{ai.analyze}}', description: 'AI 分析的完整结果' },
+      { label: 'AI 置信度', value: '{{ai.analyze.confidence}}', description: 'AI 分析的置信度评分' },
     ],
+    'API 响应': [
+      { label: 'API 响应数据', value: '{{api.response.data}}', description: 'API 调用返回的数据' },
+      { label: 'API 状态码', value: '{{api.response.status_code}}', description: 'API 调用的HTTP状态码' },
+    ],
+    '客户基础信息': [],
     '客户自定义字段': [],
-  })
+  })); // Corrected: removed [1] after useState initialization
+
+  const fetchCustomerFields = useCallback(async () => {
+    try {
+      const response = await api.get('/api/customers/fields/detailed')
+      console.log('Fetched customer fields:', response)
+
+      // 更新变量选择器中的客户相关数据
+      setAvailableVariables((prev: any) => ({
+        ...prev,
+        '客户基础信息': response.basic_fields || [],
+        '客户自定义字段': response.custom_fields || []
+      }))
+    } catch (error) {
+      console.error('Failed to fetch customer fields:', error)
+      // 如果API调用失败，设置默认的字段信息
+      setAvailableVariables((prev: any) => ({
+        ...prev,
+        '客户基础信息': [
+          { label: '客户ID', value: '{{db.customer.id}}', description: '客户的唯一标识符' },
+          { label: '客户姓名', value: '{{db.customer.name}}', description: '客户的姓名' },
+          { label: '客户电话', value: '{{db.customer.phone}}', description: '客户的电话号码' },
+          { label: '客户邮箱', value: '{{db.customer.email}}', description: '客户的邮箱地址' },
+          { label: '客户状态', value: '{{db.customer.status}}', description: '客户的当前状态' },
+          { label: '阶段ID', value: '{{db.customer.stage_id}}', description: '客户所在的销售阶段' },
+          { label: '最小预算', value: '{{db.customer.budget_min}}', description: '客户的最小预算' },
+          { label: '最大预算', value: '{{db.customer.budget_max}}', description: '客户的最大预算' },
+          { label: '入住日期', value: '{{db.customer.move_in_date}}', description: '客户期望的入住日期' },
+          { label: '偏好位置', value: '{{db.customer.preferred_location}}', description: '客户偏好的位置' },
+          { label: '创建时间', value: '{{db.customer.created_at}}', description: '客户记录创建时间' },
+          { label: '更新时间', value: '{{db.customer.updated_at}}', description: '客户记录最后更新时间' },
+        ],
+        '客户自定义字段': [
+          { label: '客户备注', value: '{{custom_fields.备注}}', description: '客户的备注信息' },
+          { label: '客户来源', value: '{{custom_fields.来源}}', description: '客户的来源渠道' },
+          { label: '客户标签', value: '{{custom_fields.标签}}', description: '客户的标签' },
+          { label: '房型偏好', value: '{{custom_fields.房型偏好}}', description: '客户的房型偏好' },
+          { label: '联系偏好', value: '{{custom_fields.联系偏好}}', description: '客户的联系偏好' },
+          { label: '跟进状态', value: '{{custom_fields.跟进状态}}', description: '客户的跟进状态' },
+        ]
+      }))
+    }
+  }, [setAvailableVariables])
 
   useEffect(() => {
     fetchCustomerFields()
@@ -1855,23 +3256,6 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     }
   }, [customEntityTypes])
 
-  // 获取客户字段数据
-  const fetchCustomerFields = async () => {
-    try {
-      const response = await api.get('/api/customers/fields/detailed')
-      console.log('Fetched customer fields:', response)
-      
-      // 更新变量选择器中的客户相关数据
-      setAvailableVariables((prev: any) => ({
-        ...prev,
-        '客户基础信息': response.basic_fields || [],
-        '客户自定义字段': response.custom_fields || []
-      }))
-    } catch (error) {
-      console.error('Failed to fetch customer fields:', error)
-    }
-  }
-
   const fetchKnowledgeBases = async () => {
     try {
       const response = await api.get('/api/knowledge-base/');
@@ -1885,7 +3269,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const openKnowledgeBaseSelector = async (e: any, position?: string) => {
     try {
       const rect = e?.currentTarget?.getBoundingClientRect?.();
-      const anchor = rect ? { left: rect.left + window.scrollX, top: rect.bottom + window.scrollY } : undefined;
+      const anchor = rect ? rect : undefined; // 直接使用 DOMRect
       try {
         const resp = await api.get('/api/knowledge-base/');
         setKnowledgeBases(resp || []);
@@ -1913,7 +3297,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           borderBottom: '1px solid #e2e8f0',
           borderRadius: '16px 16px 0 0'
         }}>
-          配置节点: {node.type}
+          配置节点: {getNodeTitle(node.type)}
         </h3>
         <div className="config-fields" style={{ 
           background: '#ffffff', 
@@ -1952,10 +3336,40 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             overflow: 'auto',
             boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)',
             border: '1px solid rgba(0,0,0,0.06)',
-            position: showVariableSelector.anchor ? 'absolute' : 'fixed',
-            left: showVariableSelector.anchor ? `${(showVariableSelector as any).anchor.left}px` : '50%',
-            top: showVariableSelector.anchor ? `${(showVariableSelector as any).anchor.top}px` : '50%',
-            transform: showVariableSelector.anchor ? 'translateY(8px)' : 'translate(-50%, -50%)'
+            position: 'fixed',
+            left: (() => {
+              if (!showVariableSelector.anchor) return '50%';
+              const anchorRect = showVariableSelector.anchor;
+              const popoverWidth = 360; // from style
+              let calculatedLeft = anchorRect.left;
+
+              // Prevent overflow on the right
+              if (calculatedLeft + popoverWidth > window.innerWidth - 20) {
+                calculatedLeft = window.innerWidth - popoverWidth - 20;
+              }
+              // Prevent overflow on the left
+              if (calculatedLeft < 20) {
+                calculatedLeft = 20;
+              }
+              return `${calculatedLeft}px`;
+            })(),
+            top: (() => {
+              if (!showVariableSelector.anchor) return '50%';
+              const anchorRect = showVariableSelector.anchor;
+              const popoverMaxHeight = window.innerHeight * 0.6; // from style
+              let calculatedTop = anchorRect.bottom + 8; // 8px offset below trigger
+
+              // Prevent overflow on the bottom
+              if (calculatedTop + popoverMaxHeight > window.innerHeight - 20) {
+                calculatedTop = anchorRect.top - popoverMaxHeight - 8; // Position above the trigger
+                // If still overflows top (unlikely given max-height), clamp to 20px from top
+                if (calculatedTop < 20) {
+                  calculatedTop = 20;
+                }
+              }
+              return `${calculatedTop}px`;
+            })(),
+            transform: showVariableSelector.anchor ? 'none' : 'translate(-50%, -50%)'
           }}>
             {/* 头部区域 */}
             <div style={{
@@ -2330,12 +3744,35 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             width: '480px',
             maxHeight: '60vh',
             overflow: 'auto',
-            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)'
-            ,
-            position: showMediaSelector.anchor ? 'absolute' : 'fixed',
-            left: showMediaSelector.anchor ? `${(showMediaSelector as any).anchor.left}px` : '50%',
-            top: showMediaSelector.anchor ? `${(showMediaSelector as any).anchor.top}px` : '50%',
-            transform: showMediaSelector.anchor ? 'translateY(8px)' : 'translate(-50%, -50%)'
+            boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)',
+            position: 'fixed',
+            left: (() => {
+              if (!showMediaSelector.anchor) return '50%';
+              const anchorRect = showMediaSelector.anchor;
+              const popoverWidth = 480; // from style
+              let calculatedLeft = anchorRect.left;
+              if (calculatedLeft + popoverWidth > window.innerWidth - 20) {
+                calculatedLeft = window.innerWidth - popoverWidth - 20;
+              }
+              if (calculatedLeft < 20) {
+                calculatedLeft = 20;
+              }
+              return `${calculatedLeft}px`;
+            })(),
+            top: (() => {
+              if (!showMediaSelector.anchor) return '50%';
+              const anchorRect = showMediaSelector.anchor;
+              const popoverMaxHeight = window.innerHeight * 0.6; // from style
+              let calculatedTop = anchorRect.bottom + 8;
+              if (calculatedTop + popoverMaxHeight > window.innerHeight - 20) {
+                calculatedTop = anchorRect.top - popoverMaxHeight - 8;
+                if (calculatedTop < 20) {
+                  calculatedTop = 20;
+                }
+              }
+              return `${calculatedTop}px`;
+            })(),
+            transform: showMediaSelector.anchor ? 'none' : 'translate(-50%, -50%)'
           }}>
             <div style={{
               display: 'flex',
@@ -2951,7 +4388,10 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                     </button>
                     {/* 新增：在预览中加入 编辑 按钮，打开 Prompt 编辑模态 */}
                     <button
-                      onClick={() => setShowPromptEditor(true)}
+                      onClick={() => {
+                        setShowPromptPreview(false); // 关闭预览
+                        setShowPromptEditor(true); // 打开编辑
+                      }}
                       style={{
                         padding: '12px 24px',
                         background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
@@ -3073,10 +4513,34 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             overflow: 'auto',
             boxShadow: '0 8px 20px rgba(0, 0, 0, 0.12)',
             border: '1px solid rgba(0,0,0,0.06)',
-            position: (showKnowledgeBaseSelector as any).anchor ? 'absolute' : 'fixed',
-            left: (showKnowledgeBaseSelector as any).anchor ? `${(showKnowledgeBaseSelector as any).anchor.left}px` : '50%',
-            top: (showKnowledgeBaseSelector as any).anchor ? `${(showKnowledgeBaseSelector as any).anchor.top}px` : '50%',
-            transform: (showKnowledgeBaseSelector as any).anchor ? 'translateY(8px)' : 'translate(-50%, -50%)'
+            position: 'fixed',
+            left: (() => {
+              if (!showKnowledgeBaseSelector.anchor) return '50%';
+              const anchorRect = showKnowledgeBaseSelector.anchor;
+              const popoverWidth = 480; // from style
+              let calculatedLeft = anchorRect.left;
+              if (calculatedLeft + popoverWidth > window.innerWidth - 20) {
+                calculatedLeft = window.innerWidth - popoverWidth - 20;
+              }
+              if (calculatedLeft < 20) {
+                calculatedLeft = 20;
+              }
+              return `${calculatedLeft}px`;
+            })(),
+            top: (() => {
+              if (!showKnowledgeBaseSelector.anchor) return '50%';
+              const anchorRect = showKnowledgeBaseSelector.anchor;
+              const popoverMaxHeight = window.innerHeight * 0.6; // from style
+              let calculatedTop = anchorRect.bottom + 8;
+              if (calculatedTop + popoverMaxHeight > window.innerHeight - 20) {
+                calculatedTop = anchorRect.top - popoverMaxHeight - 8;
+                if (calculatedTop < 20) {
+                  calculatedTop = 20;
+                }
+              }
+              return `${calculatedTop}px`;
+            })(),
+            transform: showKnowledgeBaseSelector.anchor ? 'none' : 'translate(-50%, -50%)'
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
               <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>选择知识库</h4>
@@ -3338,7 +4802,10 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                     </button>
                     {/* 新增：在预览中加入 编辑 按钮，打开 Prompt 编辑模态 */}
                     <button
-                      onClick={() => setShowPromptEditor(true)}
+                      onClick={() => {
+                        setShowPromptPreview(false); // 关闭预览
+                        setShowPromptEditor(true); // 打开编辑
+                      }}
                       style={{
                         padding: '12px 24px',
                         background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',

@@ -36,12 +36,15 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     print(f"⏱️ {datetime.now()} - 收到消息推送: {data}")
     
     # 验证必要字段
-    if not data.get("phone"):
-        raise HTTPException(status_code=400, detail="Missing phone number")
-    if not data.get("content"):
+    if not data.get("content"): # content 现在是所有消息的必要字段
         raise HTTPException(status_code=400, detail="Missing message content")
         
+    # 获取消息来源渠道，默认为 whatsapp
+    channel = data.get("channel", "whatsapp")
     phone = data.get("phone")
+    chat_id = data.get("chat_id") # Telegram 消息的 chat_id
+    from_id = data.get("from_id") # Telegram 消息的发送者 user_id
+
     content = data.get("content")
     name = data.get("name", "Unknown")
     chat_history = data.get("chat_history", [])  # 新增聊天历史字段
@@ -49,7 +52,7 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     # 🔒 首先確定用戶ID
     owner_user_id = data.get("user_id")
     if owner_user_id is None:
-        # 查找管理员用户（mingkun1999@gmail.com）
+        # Fallback to admin user (mingkun1999@gmail.com) if user_id is not provided
         admin_emails = settings.admin_emails.split(",")
         admin_user = db.query(models.User).filter(
             models.User.email.in_(admin_emails)
@@ -69,8 +72,10 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     # 准备触发数据
     trigger_data = {
         "trigger_type": "message",
-        "channel": "whatsapp",
+        "channel": channel, # 动态设置 channel
         "phone": phone,
+        "chat_id": chat_id, # 添加 chat_id
+        "from_id": from_id, # 添加 from_id
         "message": content,
         "name": name,
         "timestamp": datetime.utcnow().isoformat(),
@@ -79,11 +84,41 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     }
 
     try:
-        # 1. 快速查找客户（使用 first() 而不是 all()）
-        customer = db.query(models.Customer).filter(models.Customer.phone == phone).first()
+        customer = None
+        # 1. 快速查找客户（优先按 Telegram chat_id 查找，然后是 phone）
+        if channel == "telegram" and chat_id:
+            customer = db.query(models.Customer).filter(
+                models.Customer.telegram_chat_id == str(chat_id),
+                models.Customer.user_id == owner_user_id # 确保数据隔离
+            ).first()
+            if customer:
+                print(f"✅ 通过 Telegram chat_id ({chat_id}) 找到客户: {customer.name}")
+
+        if not customer and phone: # 如果 Telegram chat_id 没找到，或者 channel 是 whatsapp，则按 phone 查找
+            customer = db.query(models.Customer).filter(
+                models.Customer.phone == phone,
+                models.Customer.user_id == owner_user_id # 确保数据隔离
+            ).first()
+            if customer:
+                print(f"✅ 通过 phone ({phone}) 找到客户: {customer.name}")
+        
         if not customer:
             # 🔒 创建新客户，使用已確定的 user_id
-            customer = models.Customer(name=name, phone=phone, status="new", user_id=owner_user_id)
+            customer_name = name if name != "Unknown" else (phone or (f"tg_{chat_id}" if chat_id else "Unknown"))
+            customer_phone = phone
+            customer_telegram_chat_id = str(chat_id) if chat_id else None
+
+            # 如果 phone 和 chat_id 都没有，则无法创建客户
+            if not customer_phone and not customer_telegram_chat_id:
+                raise HTTPException(status_code=400, detail="Missing phone number or Telegram chat ID to create customer")
+
+            customer = models.Customer(
+                name=customer_name, 
+                phone=customer_phone, 
+                telegram_chat_id=customer_telegram_chat_id, # 设置 Telegram chat ID
+                status="new", 
+                user_id=owner_user_id
+            )
             db.add(customer)
             db.commit()
             db.refresh(customer)

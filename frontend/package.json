@@ -21,7 +21,8 @@
     "react-beautiful-dnd": "^13.1.1",
     "react-dom": "18.3.1",
     "reactflow": "^11.11.4",
-    "swr": "2.2.0"
+    "swr": "2.2.0",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "24.5.2",

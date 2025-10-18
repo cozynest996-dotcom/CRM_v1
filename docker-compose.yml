@@ -22,14 +22,14 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    mem_limit: 1024m # Set memory limit to 1GB
     restart: always
     env_file:
       - ./.env
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - WHATSAPP_GATEWAY_URL=http://whatsapp_gateway:3002
+      WHATSAPP_GATEWAY_URL: http://whatsapp_gateway:3002
     volumes:
       - ./backend:/app # Binding mount for local code changes
     depends_on:
@@ -59,7 +59,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3002:3002" # Assuming WhatsApp gateway runs on port 3002
-    environment: {}
+    environment:
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium # 显式设置 Chromium 路径以避免拼写错误
     volumes:
       - ./whatsapp_gateway:/app
       - ./whatsapp_gateway/user_sessions:/app/user_sessions # Persist session data

@@ -50,6 +50,12 @@ export default function NodeSelector({ onSelect, onClose }: NodeSelectorProps) {
       description: '使用预设的回复模板',
       icon: nodeConfigs.Template.icon,
     },
+    { 
+      type: 'CustomAPI',
+      title: '自定义API',
+      description: '调用外部API接口获取数据',
+      icon: nodeConfigs.CustomAPI.icon,
+    },
     // { # Handoff 节点已合并到 AI 节点中
     //   type: 'Handoff',
     //   title: 'Handoff (人工接手)',

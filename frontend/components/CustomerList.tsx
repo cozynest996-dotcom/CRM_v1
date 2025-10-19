@@ -5,6 +5,7 @@ import { formatMessageTime, formatMessageDate, formatFullDateTime } from '../uti
 const DEFAULT_COLUMNS = [
   { key: 'name', label: '姓名', visible: true },
   { key: 'phone', label: '电话', visible: true },
+  { key: 'telegram_chat_id', label: 'Telegram ID', visible: true },
   { key: 'email', label: '邮箱', visible: true },
   { key: 'stage_id', label: '阶段', visible: true },
   { key: 'last_timestamp', label: '最后联系时间', visible: true },
@@ -36,7 +37,23 @@ export default function CustomerList() {
       const res = await api.get('/settings/customer-list-config')
       
       if (res && res.config && Array.isArray(res.config.columns)) {
-        setColumns(res.config.columns)
+        // 合并保存的配置和默认配置，确保新的默认列被包含
+        const savedColumns = res.config.columns
+        const mergedColumns = [...DEFAULT_COLUMNS]
+        
+        // 更新已保存列的可见性和顺序
+        savedColumns.forEach(savedCol => {
+          const defaultIndex = mergedColumns.findIndex(col => col.key === savedCol.key)
+          if (defaultIndex >= 0) {
+            // 更新现有列的配置
+            mergedColumns[defaultIndex] = { ...mergedColumns[defaultIndex], ...savedCol }
+          } else {
+            // 添加自定义列
+            mergedColumns.push(savedCol)
+          }
+        })
+        
+        setColumns(mergedColumns)
       }
     } catch (e) {
       // ignore -> use default
@@ -375,7 +392,7 @@ export default function CustomerList() {
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                     whiteSpace: 'nowrap',
-                    minWidth: c.key === 'name' ? '150px' : c.key === 'phone' ? '120px' : c.key === 'email' ? '180px' : '100px'
+                    minWidth: c.key === 'name' ? '150px' : c.key === 'phone' ? '120px' : c.key === 'telegram_chat_id' ? '130px' : c.key === 'email' ? '180px' : '100px'
                   }}>
                     {c.label}
                   </th>
@@ -472,12 +489,15 @@ export default function CustomerList() {
                             }
                           }
                           
-                          // 特殊处理email和phone的显示
+                          // 特殊处理email、phone和telegram_chat_id的显示
                           if (c.key === 'email' && val) {
                             return <span style={{ color: '#3b82f6' }}>{String(val)}</span>
                           }
                           if (c.key === 'phone' && val) {
                             return <span style={{ color: '#059669', fontFamily: 'monospace' }}>{String(val)}</span>
+                          }
+                          if (c.key === 'telegram_chat_id' && val) {
+                            return <span style={{ color: '#0088cc', fontFamily: 'monospace', fontSize: '13px' }}>{String(val)}</span>
                           }
                           
                           return String(val)

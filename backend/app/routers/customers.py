@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import Optional
 import json
 import uuid
+from datetime import datetime
 
 from app.db.database import SessionLocal
 from app.db import models
@@ -16,6 +17,73 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    finally:
+        db.close()
+
+async def trigger_db_workflows(customer_id: str, user_id: int, field_changes: list, table: str):
+    """触发与数据库字段变化相关的工作流"""
+    from app.services.workflow_engine import WorkflowEngine
+    import asyncio
+    
+    db = SessionLocal()
+    try:
+        # 查找所有活跃的 DB Trigger 工作流
+        workflows = db.query(models.Workflow).filter(
+            models.Workflow.user_id == user_id,
+            models.Workflow.is_active == True
+        ).all()
+        
+        for workflow in workflows:
+            try:
+                # 获取工作流节点数据
+                nodes = workflow.nodes if workflow.nodes else []
+                
+                # 查找 DB Trigger 节点
+                for node in nodes:
+                    if node.get('type') in ['DbTrigger', 'StatusTrigger']:
+                        node_data = node.get('data', {})
+                        config = node_data.get('config', {})
+                        
+                        # 检查是否匹配表名
+                        if config.get('table', 'customers') != table:
+                            continue
+                        
+                        # 检查字段变化是否匹配
+                        trigger_field = config.get('field')
+                        if not trigger_field:
+                            continue
+                        
+                        # 查找匹配的字段变化
+                        for change in field_changes:
+                            if change['field'] == trigger_field:
+                                # 构造触发数据
+                                trigger_data = {
+                                    "type": "db_change",
+                                    "table": table,
+                                    "field": trigger_field,
+                                    "old_value": str(change['old_value']) if change['old_value'] is not None else "",
+                                    "new_value": str(change['new_value']) if change['new_value'] is not None else "",
+                                    "customer_id": str(customer_id),  # 转换 UUID 为字符串
+                                    "user_id": user_id,
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                                
+                                print(f"🚀 触发 DB Trigger 工作流: {workflow.name}")
+                                print(f"   字段: {trigger_field}")
+                                print(f"   旧值: {change['old_value']} -> 新值: {change['new_value']}")
+                                
+                                # 执行工作流
+                                engine = WorkflowEngine(db)
+                                await engine.execute_workflow(workflow.id, trigger_data)
+                                
+                                break  # 每个节点只触发一次
+                                
+            except Exception as e:
+                print(f"❌ 执行 DB Trigger 工作流失败: {workflow.name}, 错误: {e}")
+                continue
+                
+    except Exception as e:
+        print(f"❌ 触发 DB 工作流时发生错误: {e}")
     finally:
         db.close()
 
@@ -85,6 +153,7 @@ def list_customers(
             'id': c.id,
             'name': c.name,
             'phone': c.phone,
+            'telegram_chat_id': c.telegram_chat_id,
             'email': c.email,
             'status': c.status,
             'stage_id': c.stage_id,
@@ -163,6 +232,8 @@ def get_customer_stages(db: Session = Depends(get_db), current_user: models.User
             for stage in stages
         ]
     except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
         logger.error(f"Error getting customer stages: {e}")
         return []
 
@@ -226,32 +297,46 @@ def get_customer_fields(db: Session = Depends(get_db), current_user: models.User
 
 
 @router.patch("/{customer_id}")
-def patch_customer(
+async def patch_customer(
     customer_id: str,
     updates: dict,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     """部分更新客户：仅允许白名单字段更新"""
-    allowed = {'name', 'phone', 'email', 'status', 'custom_fields', 'stage_id'}
+    allowed = {'name', 'phone', 'telegram_chat_id', 'email', 'status', 'custom_fields', 'stage_id'}
     customer = db.query(models.Customer).filter(models.Customer.id == customer_id, models.Customer.user_id == current_user.id).first()
     if not customer:
         raise HTTPException(status_code=404, detail='Customer not found')
 
+    # 记录更新前的值，用于 DB Trigger
+    old_values = {}
+    field_changes = []
+    
     changed = False
     for k, v in updates.items():
         if k not in allowed:
             continue
 
+        # 记录旧值
+        old_value = getattr(customer, k, None)
+        
         # stage_id 校验
         if k == 'stage_id':
             if v is None:
+                if old_value is not None:
+                    old_values[k] = old_value
+                    field_changes.append({'field': k, 'old_value': old_value, 'new_value': None})
                 setattr(customer, 'stage_id', None)
                 changed = True
                 continue
             stage = db.query(models.CustomerStage).filter(models.CustomerStage.id == v, models.CustomerStage.user_id == current_user.id).first()
             if not stage:
                 raise HTTPException(status_code=400, detail='Invalid stage_id')
+            if old_value != v:
+                old_values[k] = old_value
+                field_changes.append({'field': k, 'old_value': old_value, 'new_value': v})
             setattr(customer, 'stage_id', v)
             changed = True
             continue
@@ -260,14 +345,30 @@ def patch_customer(
         if hasattr(customer, k):
             if k == 'custom_fields' and isinstance(v, dict) and isinstance(customer.custom_fields, dict):
                 merged = {**customer.custom_fields, **v}
+                if old_value != merged:
+                    old_values[k] = old_value
+                    field_changes.append({'field': k, 'old_value': old_value, 'new_value': merged})
                 setattr(customer, 'custom_fields', merged)
             else:
+                if old_value != v:
+                    old_values[k] = old_value
+                    field_changes.append({'field': k, 'old_value': old_value, 'new_value': v})
                 setattr(customer, k, v)
             changed = True
 
     if changed:
         db.commit()
         db.refresh(customer)
+        
+        # 触发 DB Trigger 工作流（后台任务）
+        if field_changes:
+            background_tasks.add_task(
+                trigger_db_workflows,
+                customer_id=customer.id,
+                user_id=current_user.id,
+                field_changes=field_changes,
+                table="customers"
+            )
 
     return {
         'status': 'ok',
@@ -275,6 +376,7 @@ def patch_customer(
             'id': customer.id,
             'name': customer.name,
             'phone': customer.phone,
+            'telegram_chat_id': customer.telegram_chat_id,
             'email': customer.email,
             'status': customer.status,
             'stage_id': customer.stage_id,
@@ -285,11 +387,23 @@ def patch_customer(
 
 @router.get('/summary')
 def list_customer_summaries(
+    search: Optional[str] = Query(None, description="search in name/phone/email"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """简要客户摘要：最后一条消息、未读数"""
-    customers = db.query(models.Customer).filter(models.Customer.user_id == current_user.id).all()
+    """简要客户摘要：最后一条消息、未读数，支持搜索"""
+    query = db.query(models.Customer).filter(models.Customer.user_id == current_user.id)
+    
+    # 添加搜索功能
+    if search:
+        like = f"%{search}%"
+        query = query.filter(
+            (models.Customer.name.ilike(like)) |
+            (models.Customer.phone.ilike(like)) |
+            (models.Customer.email.ilike(like))
+        )
+    
+    customers = query.all()
     out = []
     for c in customers:
         last = (
@@ -302,12 +416,22 @@ def list_customer_summaries(
             'id': c.id,
             'name': c.name,
             'phone': c.phone,
+            'telegram_chat_id': c.telegram_chat_id,
+            'email': c.email,
             'photo_url': c.photo_url,
             'status': c.status,
+            'stage_id': c.stage_id,
+            'custom_fields': c.custom_fields,
             'last_message': last.content if last and hasattr(last, 'content') else None,
             'last_timestamp': last.timestamp.isoformat() if last and last.timestamp else None,
             'unread_count': c.unread_count or 0,
+            'updated_at': c.updated_at.isoformat() if c.updated_at else None,
+            # 用于排序的时间戳（优先使用最后消息时间，否则使用更新时间）
+            'sort_timestamp': last.timestamp.isoformat() if last and last.timestamp else (c.updated_at.isoformat() if c.updated_at else c.id)
         })
+    
+    # 按最新消息时间排序（最新的在前面）
+    out.sort(key=lambda x: x['sort_timestamp'] if x['sort_timestamp'] else '', reverse=True)
     return out
 
 
@@ -344,6 +468,7 @@ def get_customer(customer_id: uuid.UUID, db: Session = Depends(get_db), current_
         'id': customer.id,
         'name': customer.name,
         'phone': customer.phone,
+        'telegram_chat_id': customer.telegram_chat_id,
         'email': customer.email,
         'status': customer.status,
         'stage_id': customer.stage_id,
@@ -434,7 +559,7 @@ def get_customer_fields_detailed(db: Session = Depends(get_db), current_user: mo
                 result['basic_fields'].append({
                     'name': col_name,
                     'label': field_info['label'],
-                    'value': f"{{{{customer.{col_name}}}}}",
+                    'value': f"{{{{db.customer.{col_name}}}}}",
                     'description': field_info['description'],
                     'type': 'text'  # 简化类型处理
                 })
@@ -466,7 +591,7 @@ def get_customer_fields_detailed(db: Session = Depends(get_db), current_user: mo
                     result['custom_fields'].append({
                         'name': key,
                         'label': key.replace('_', ' ').title(),
-                        'value': f"{{{{customer.custom.{key}}}}}",
+                        'value': f"{{{{custom_fields.{key}}}}}",
                         'description': f'客户自定义字段: {key}',
                         'type': 'custom'
                     })

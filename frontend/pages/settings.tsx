@@ -34,6 +34,7 @@ interface IntegrationSettings {
 interface WhatsAppStatus {
   ready: boolean
   need_qr: boolean
+  has_session?: boolean
   qr?: string | null
 }
 
@@ -826,7 +827,7 @@ export default function SettingsPage() {
                     </div>
                   )}
                 </div>
-              ) : (
+              ) : combinedWhatsappStatus.has_session ? (
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -849,7 +850,7 @@ export default function SettingsPage() {
                     <div>
                       <div style={{ fontWeight: '500', color: '#c05621' }}>正在连接 WhatsApp...</div>
                       <div style={{ fontSize: '14px', color: '#4a5568', marginTop: '4px' }}>
-                        请稍候，系统正在建立 WhatsApp 连接
+                        检测到已保存的会话，正在尝试自动连接
                       </div>
                     </div>
                   </div>
@@ -880,6 +881,61 @@ export default function SettingsPage() {
                   >
                     {(isLoading || isWhatsappQRLoading) ? '刷新中...' : '🔄 重新连接'}
                   </button>
+                </div>
+              ) : (
+                <div style={{
+                  padding: '16px',
+                  backgroundColor: '#fff5f0',
+                  borderRadius: '8px',
+                  border: '1px solid #fc8181'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', marginBottom: '16px' }}>
+                    <span style={{ color: '#c53030', fontSize: '20px', marginRight: '12px' }}>📱</span>
+                    <div>
+                      <div style={{ fontWeight: '500', color: '#c53030' }}>需要首次登录</div>
+                      <div style={{ fontSize: '14px', color: '#4a5568', marginTop: '4px' }}>
+                        请扫描二维码完成 WhatsApp 首次登录设置
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'center',
+                    padding: '20px',
+                    backgroundColor: 'white',
+                    borderRadius: '8px',
+                    border: '1px solid #e2e8f0'
+                  }}>
+                    <button
+                      onClick={handleRefreshQR}
+                      disabled={isLoading || isWhatsappQRLoading}
+                      style={{
+                        padding: '12px 24px',
+                        backgroundColor: '#4299e1',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '8px',
+                        cursor: (isLoading || isWhatsappQRLoading) ? 'not-allowed' : 'pointer',
+                        fontSize: '16px',
+                        fontWeight: '500',
+                        opacity: (isLoading || isWhatsappQRLoading) ? 0.6 : 1,
+                        transition: 'all 0.2s'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!isLoading && !isWhatsappQRLoading) {
+                          e.currentTarget.style.backgroundColor = '#3182ce'
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!isLoading && !isWhatsappQRLoading) {
+                          e.currentTarget.style.backgroundColor = '#4299e1'
+                        }
+                      }}
+                    >
+                      {(isLoading || isWhatsappQRLoading) ? '生成中...' : '📱 生成登录二维码'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

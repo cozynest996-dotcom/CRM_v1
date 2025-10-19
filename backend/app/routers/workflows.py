@@ -21,14 +21,16 @@ Workflows Router
 """
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Any
 from pydantic import BaseModel
 from datetime import datetime
+from fastapi.responses import JSONResponse
 
 from app.db.database import get_db
 from app.db.models import Workflow, WorkflowExecution, WorkflowNodeTemplate
 from app.middleware.auth import get_current_user
 from app.services.workflow_engine import WorkflowEngine
+from app.schemas.workflow_io import WorkflowExportSchema, WorkflowImportSchema
 
 router = APIRouter(tags=["workflows"])
 
@@ -46,18 +48,19 @@ class WorkflowNode(BaseModel):
     description: Optional[str] = None
     config: Optional[dict] = None
 
+# WorkflowCreate 和 WorkflowResponse 保持不变，用于内部 API
 class WorkflowCreate(BaseModel):
     name: str
     description: Optional[str] = ""
-    nodes: List[dict]  # 保持灵活性，允许任意节点配置
-    edges: List[WorkflowEdge]  # 但边必须符合特定格式
+    nodes: List[dict]
+    edges: List[dict]
     is_active: bool = False
 
 class WorkflowUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     nodes: Optional[List[dict]] = None
-    edges: Optional[List[WorkflowEdge]] = None
+    edges: Optional[List[dict]] = None
     is_active: Optional[bool] = None
 
 class WorkflowResponse(BaseModel):
@@ -65,7 +68,7 @@ class WorkflowResponse(BaseModel):
     name: str
     description: str
     nodes: List[dict]
-    edges: List[WorkflowEdge]
+    edges: List[dict]
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -100,6 +103,86 @@ async def get_workflows(
     ).all()
     return workflows
 
+# 新增：导出所有工作流 (必须在 {workflow_id} 路由之前)
+@router.get("/workflows/export")
+async def export_workflows(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """导出当前用户的所有工作流"""
+    import json
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        workflows = db.query(Workflow).filter(
+            Workflow.user_id == current_user.id,
+            Workflow.is_deleted != True
+        ).all()
+        
+        logger.info(f"Found {len(workflows)} workflows to export")
+        
+        # 确保导出时不包含敏感信息或不必要的字段，同时处理成可导入的格式
+        export_data = []
+        for i, wf in enumerate(workflows):
+            try:
+                logger.info(f"Processing workflow {i+1}: {wf.name}")
+                
+                # 安全地处理 nodes 和 edges，确保它们是可序列化的
+                nodes = wf.nodes or []
+                edges = wf.edges or []
+                
+                # 尝试序列化以检查是否有问题
+                try:
+                    json.dumps(nodes)
+                    logger.info(f"Workflow {wf.name}: nodes serializable")
+                except Exception as e:
+                    logger.error(f"Workflow {wf.name}: nodes not serializable: {e}")
+                    nodes = []
+                
+                try:
+                    json.dumps(edges)
+                    logger.info(f"Workflow {wf.name}: edges serializable")
+                except Exception as e:
+                    logger.error(f"Workflow {wf.name}: edges not serializable: {e}")
+                    edges = []
+                
+                workflow_data = {
+                    "name": wf.name,
+                    "description": wf.description or "",
+                    "nodes": nodes,
+                    "edges": edges,
+                    "is_active": wf.is_active
+                }
+                
+                # 最终检查整个工作流数据是否可序列化
+                try:
+                    json.dumps(workflow_data)
+                    export_data.append(workflow_data)
+                    logger.info(f"Workflow {wf.name}: successfully added to export")
+                except Exception as e:
+                    logger.error(f"Workflow {wf.name}: final serialization failed: {e}")
+                    # 添加一个最小的工作流数据
+                    export_data.append({
+                        "name": wf.name,
+                        "description": wf.description or "",
+                        "nodes": [],
+                        "edges": [],
+                        "is_active": wf.is_active
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error processing workflow {i+1}: {e}")
+                continue
+        
+        logger.info(f"Successfully prepared {len(export_data)} workflows for export")
+        return export_data
+        
+    except Exception as e:
+        logger.error(f"Error in export_workflows: {e}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
 # 获取单个工作流
 @router.get("/workflows/{workflow_id}", response_model=WorkflowResponse)
 async def get_workflow(
@@ -126,13 +209,7 @@ async def create_workflow(
     current_user = Depends(get_current_user)
 ):
     """创建新的工作流"""
-    # 转换 WorkflowEdge 对象为字典格式
     edges_data = workflow_data.edges
-    if isinstance(edges_data, list):
-        edges_data = [
-            edge.dict() if hasattr(edge, 'dict') else edge
-            for edge in edges_data
-        ]
     
     workflow = Workflow(
         name=workflow_data.name,
@@ -174,14 +251,7 @@ async def update_workflow(
     if workflow_data.nodes is not None:
         workflow.nodes = workflow_data.nodes
     if workflow_data.edges is not None:
-        # 转换 WorkflowEdge 对象为字典格式
-        if isinstance(workflow_data.edges, list):
-            workflow.edges = [
-                edge.dict() if hasattr(edge, 'dict') else edge
-                for edge in workflow_data.edges
-            ]
-        else:
-            workflow.edges = workflow_data.edges
+        workflow.edges = workflow_data.edges
     if workflow_data.is_active is not None:
         workflow.is_active = workflow_data.is_active
     
@@ -212,16 +282,7 @@ async def patch_workflow(
     # 更新字段
     for field, value in workflow_data.items():
         if hasattr(workflow, field):
-            # 特殊处理 edges 字段
-            if field == 'edges' and isinstance(value, list):
-                # 转换 WorkflowEdge 对象为字典格式
-                processed_edges = [
-                    edge.dict() if hasattr(edge, 'dict') else edge
-                    for edge in value
-                ]
-                setattr(workflow, field, processed_edges)
-            else:
-                setattr(workflow, field, value)
+            setattr(workflow, field, value)
     
     workflow.updated_at = datetime.utcnow()
     
@@ -412,7 +473,6 @@ async def toggle_workflow(
     
     workflow.is_active = not workflow.is_active
     workflow.updated_at = datetime.utcnow()
-    
     db.commit()
     
     return {
@@ -462,7 +522,7 @@ async def create_mvp_template_workflow(
                     "onFail": "n_template",
                     "prompts": {
                         "system": "You are a CRM assistant. Output STRICT JSON with keys: analyze, reply, meta.",
-                        "user_template": "Latest message:\n{last_message}\n\nKnown customer (normalized row):\n{row}\n\nAllowed schema:\n{schema_spec}\n\nTasks:\n1) analyze -> updates/uncertain/reason/confidence (only keys allowed; values normalized).\n2) provisional profile = row ⊕ updates.\n3) reply <=700 chars; '|||' to split; <=2 follow-ups.\n4) meta: {\\\"used_profile\\\":\\\"provisional\\\",\\\"separator\\\":\\\"|||\\\",\\\"safe_to_send_before_db_update\\\":false}.\nReturn JSON only."
+                        "user_template": "Latest message:\n{last_message}\n\nKnown customer (normalized row):\n{row}\n\nAllowed schema:\n{schema_spec}\n\nTasks:\n1) analyze -> updates/uncertain/reason/confidence (only keys allowed; values normalized).\n2) provisional profile = row ⊕ updates.\n3) reply <=700 chars; '|||' to split; <=2 follow-ups.\n4) meta: {\"used_profile\":\"provisional\",\"separator\":\"|||\",\"safe_to_send_before_db_update\":false}.\nReturn JSON only."
                     }
                 },
                 "position": {"x": 300, "y": 100}
@@ -607,3 +667,75 @@ async def get_node_templates(
     }
 
     return [ai_template]
+
+
+# 新增：导出单个工作流
+@router.get("/workflows/{workflow_id}/export")
+async def export_single_workflow(
+    workflow_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """导出单个工作流"""
+    workflow = db.query(Workflow).filter(
+        Workflow.id == workflow_id,
+        Workflow.user_id == current_user.id
+    ).first()
+    
+    if not workflow:
+        raise HTTPException(status_code=404, detail="工作流不存在")
+    
+    export_data = {
+        "name": workflow.name,
+        "description": workflow.description or "",
+        "nodes": workflow.nodes or [],
+        "edges": workflow.edges or [],
+        "is_active": workflow.is_active
+    }
+    return export_data
+
+# 新增：导入工作流
+@router.post("/workflows/import", response_model=List[WorkflowResponse])
+async def import_workflows(
+    import_data: List[WorkflowImportSchema],
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """导入工作流（支持导入多个）"""
+    imported_workflows = []
+    for wf_data in import_data:
+        # 检查是否已存在同名工作流
+        existing_workflow = db.query(Workflow).filter(
+            Workflow.name == wf_data.name,
+            Workflow.user_id == current_user.id,
+            Workflow.is_deleted != True
+        ).first()
+
+        if existing_workflow:
+            # 如果存在同名，可以选择跳过或更新
+            # 这里选择更新，但可以根据需求改为跳过或报错
+            existing_workflow.description = wf_data.description
+            existing_workflow.nodes = wf_data.nodes
+            existing_workflow.edges = wf_data.edges
+            existing_workflow.is_active = wf_data.is_active
+            existing_workflow.updated_at = datetime.utcnow()
+            db.add(existing_workflow)
+            db.commit()
+            db.refresh(existing_workflow)
+            imported_workflows.append(existing_workflow)
+        else:
+            # 创建新工作流
+            new_workflow = Workflow(
+                name=wf_data.name,
+                description=wf_data.description,
+                nodes=wf_data.nodes,
+                edges=wf_data.edges,
+                is_active=wf_data.is_active,
+                user_id=current_user.id
+            )
+            db.add(new_workflow)
+            db.commit()
+            db.refresh(new_workflow)
+            imported_workflows.append(new_workflow)
+            
+    return imported_workflows

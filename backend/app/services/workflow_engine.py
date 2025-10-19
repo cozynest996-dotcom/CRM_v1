@@ -52,8 +52,12 @@ logger = logging.getLogger(__name__)
 
 def serialize_for_json(obj):
     """将对象序列化为 JSON 兼容的格式"""
+    import uuid
+    
     if obj is None:
         return None
+    elif isinstance(obj, uuid.UUID):  # 处理 UUID 对象
+        return str(obj)
     elif hasattr(obj, '__dict__'):
         # 数据库对象
         if hasattr(obj, '__tablename__'):
@@ -64,6 +68,8 @@ def serialize_for_json(obj):
                 if value is not None:
                     if hasattr(value, 'isoformat'):  # datetime 对象
                         result[column.name] = value.isoformat()
+                    elif isinstance(value, uuid.UUID):  # UUID 对象
+                        result[column.name] = str(value)
                     else:
                         result[column.name] = str(value)
                 else:
@@ -434,6 +440,221 @@ class MessageTriggerProcessor(NodeProcessor):
             return result
         
         raise ValueError(f"Unsupported channel: {channel} or match_key: {match_key}")
+
+class DbTriggerProcessor(NodeProcessor):
+    """数据库触发器节点 - 监听数据库字段变化"""
+    
+    async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
+        """处理数据库触发"""
+        node_data = node_config.get("data", {})
+        node_config_inner = node_data.get("config", {})
+        
+        # 获取触发器配置
+        table = node_config_inner.get("table", "customers")
+        field = node_config_inner.get("field")
+        condition = node_config_inner.get("condition", "equals")
+        value = node_config_inner.get("value", "")
+        frequency = node_config_inner.get("frequency", "immediate")
+        trigger_platform = node_config_inner.get("trigger_platform", "whatsapp")
+        
+        print(f"🗄️ DbTrigger 配置:")
+        print(f"  表: {table}")
+        print(f"  字段: {field}")
+        print(f"  条件: {condition}")
+        print(f"  值: {value}")
+        print(f"  频率: {frequency}")
+        print(f"  触发平台: {trigger_platform}")
+        
+        if not field:
+            raise ValueError("数据库触发器必须指定监听字段")
+        
+        # 从触发数据中获取数据库变化信息
+        trigger_data = self.context.get("trigger_data", {})
+        
+        # 验证触发数据是否为数据库变化事件
+        if trigger_data.get("type") != "db_change":
+            raise ValueError(f"DbTrigger requires db_change trigger type, got: {trigger_data.get('type')}")
+        
+        # 验证表名匹配
+        if trigger_data.get("table") != table:
+            raise ValueError(f"Table mismatch: trigger table '{trigger_data.get('table')}' does not match node table '{table}'")
+        
+        # 验证字段匹配
+        if trigger_data.get("field") != field:
+            raise ValueError(f"Field mismatch: trigger field '{trigger_data.get('field')}' does not match node field '{field}'")
+        
+        # 获取字段的新值和旧值
+        new_value = trigger_data.get("new_value", "")
+        old_value = trigger_data.get("old_value", "")
+        
+        print(f"  触发数据:")
+        print(f"    新值: {new_value}")
+        print(f"    旧值: {old_value}")
+        
+        # 根据条件检查是否满足触发条件
+        trigger_matched = self._check_condition(condition, new_value, value)
+        
+        if not trigger_matched:
+            raise ValueError(f"Condition not met: {field} {condition} {value}, actual value: {new_value}")
+        
+        print(f"  ✅ 触发条件满足")
+        
+        # 获取完整的客户数据
+        customer_id = trigger_data.get("customer_id")
+        if customer_id:
+            from app.db.models import Customer
+            customer = self.db.query(Customer).filter(Customer.id == customer_id).first()
+            if customer:
+                # 将客户数据添加到上下文
+                customer_data = {
+                    "id": customer.id,
+                    "name": customer.name,
+                    "phone": customer.phone,
+                    "email": customer.email,
+                    "status": customer.status,
+                    "stage_id": customer.stage_id,
+                    "telegram_chat_id": customer.telegram_chat_id,
+                    "photo_url": customer.photo_url,
+                    "last_message": customer.last_message,
+                    "last_timestamp": customer.last_timestamp.isoformat() if customer.last_timestamp else None,
+                    "unread_count": customer.unread_count,
+                    "updated_at": customer.updated_at.isoformat() if customer.updated_at else None,
+                    "version": customer.version,
+                }
+                
+                # 添加所有自定义字段
+                if hasattr(customer, 'custom_fields') and customer.custom_fields:
+                    customer_data.update(customer.custom_fields)
+                
+                self.context.set("customer", customer_data)
+                print(f"  📊 已加载客户数据: {customer.name} ({customer.phone})")
+        
+        # 返回触发结果
+        result = {
+            "trigger_type": "db_change",
+            "table": table,
+            "field": field,
+            "condition": condition,
+            "value": value,
+            "new_value": new_value,
+            "old_value": old_value,
+            "customer_id": customer_id,
+            "timestamp": trigger_data.get("timestamp"),
+        }
+        
+        # 根据配置的平台添加客户联系信息，并更新上下文中的 trigger_data
+        if customer_id:
+            from app.db.models import Customer
+            customer = self.db.query(Customer).filter(Customer.id == customer_id).first()
+            if customer:
+                contact_info_added = False
+                
+                # 获取当前的 trigger_data
+                current_trigger_data = self.context.get("trigger_data", {})
+                
+                if trigger_platform == "whatsapp" and customer.phone:
+                    result["phone"] = customer.phone
+                    result["channel"] = "whatsapp"
+                    result["name"] = customer.name or customer.phone
+                    
+                    # 更新上下文中的 trigger_data
+                    current_trigger_data.update({
+                        "phone": customer.phone,
+                        "channel": "whatsapp",
+                        "name": customer.name or customer.phone
+                    })
+                    self.context.set("trigger_data", current_trigger_data)
+                    
+                    print(f"  📱 添加 WhatsApp 联系信息: {customer.phone} ({customer.name})")
+                    contact_info_added = True
+                    
+                elif trigger_platform == "telegram" and customer.telegram_chat_id:
+                    result["chat_id"] = customer.telegram_chat_id
+                    result["telegram_chat_id"] = customer.telegram_chat_id
+                    result["channel"] = "telegram"
+                    result["name"] = customer.name or f"tg_{customer.telegram_chat_id}"
+                    
+                    # 更新上下文中的 trigger_data
+                    current_trigger_data.update({
+                        "chat_id": customer.telegram_chat_id,
+                        "telegram_chat_id": customer.telegram_chat_id,
+                        "channel": "telegram",
+                        "name": customer.name or f"tg_{customer.telegram_chat_id}"
+                    })
+                    self.context.set("trigger_data", current_trigger_data)
+                    
+                    print(f"  💬 添加 Telegram 联系信息: {customer.telegram_chat_id} ({customer.name})")
+                    contact_info_added = True
+                    
+                elif trigger_platform == "auto":
+                    # 自动检测：优先 WhatsApp，回退到 Telegram
+                    if customer.phone:
+                        result["phone"] = customer.phone
+                        result["channel"] = "whatsapp"
+                        result["name"] = customer.name or customer.phone
+                        
+                        # 更新上下文中的 trigger_data
+                        current_trigger_data.update({
+                            "phone": customer.phone,
+                            "channel": "whatsapp",
+                            "name": customer.name or customer.phone
+                        })
+                        self.context.set("trigger_data", current_trigger_data)
+                        
+                        print(f"  🤖 自动选择 WhatsApp: {customer.phone} ({customer.name})")
+                        contact_info_added = True
+                    elif customer.telegram_chat_id:
+                        result["chat_id"] = customer.telegram_chat_id
+                        result["telegram_chat_id"] = customer.telegram_chat_id
+                        result["channel"] = "telegram"
+                        result["name"] = customer.name or f"tg_{customer.telegram_chat_id}"
+                        
+                        # 更新上下文中的 trigger_data
+                        current_trigger_data.update({
+                            "chat_id": customer.telegram_chat_id,
+                            "telegram_chat_id": customer.telegram_chat_id,
+                            "channel": "telegram",
+                            "name": customer.name or f"tg_{customer.telegram_chat_id}"
+                        })
+                        self.context.set("trigger_data", current_trigger_data)
+                        
+                        print(f"  🤖 自动选择 Telegram: {customer.telegram_chat_id} ({customer.name})")
+                        contact_info_added = True
+                
+                if not contact_info_added:
+                    print(f"  ⚠️ 警告: 客户 {customer.name} 没有可用的联系方式 (平台: {trigger_platform})")
+                    
+                # 添加用户ID用于权限控制
+                result["user_id"] = customer.user_id
+        
+        return result
+    
+    def _check_condition(self, condition: str, actual_value: str, expected_value: str) -> bool:
+        """检查字段值是否满足触发条件"""
+        actual_str = str(actual_value).strip()
+        expected_str = str(expected_value).strip()
+        
+        if condition == "equals":
+            return actual_str == expected_str
+        elif condition == "not_equals":
+            return actual_str != expected_str
+        elif condition == "contains":
+            return expected_str.lower() in actual_str.lower()
+        elif condition == "not_contains":
+            return expected_str.lower() not in actual_str.lower()
+        elif condition == "starts_with":
+            return actual_str.lower().startswith(expected_str.lower())
+        elif condition == "ends_with":
+            return actual_str.lower().endswith(expected_str.lower())
+        elif condition == "is_empty":
+            return actual_str == "" or actual_str is None
+        elif condition == "is_not_empty":
+            return actual_str != "" and actual_str is not None
+        elif condition == "changed":
+            # 对于 "changed" 条件，只要新值和旧值不同就触发
+            return True
+        else:
+            return False
 
 class AIProcessor(NodeProcessor):
     """AI 节点 - 集成分析和回复生成"""
@@ -1903,13 +2124,27 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                 
                 print(f"  調用 WhatsApp 服務...")
                 
-                # 检查是否有媒体需要发送
-                ai_reply = self.context.ai.get("reply", {})
-                media_uuids = ai_reply.get("media_uuids", [])
-                folder_names = ai_reply.get("folder_names", [])
-                media_settings = ai_reply.get("media_settings", {})
+                # 检查是否有媒体需要发送 - 优先从模板节点获取
+                template_media_list = self.context.get("media_list", [])
+                template_media_settings = self.context.get("media_settings", {})
+                template_message_templates = self.context.get("message_templates", [])
+                template_paired_items = self.context.get("paired_items", [])  # 新增：获取配对项目
+                
+                # 如果模板节点没有媒体，回退到AI节点
+                if not template_media_list:
+                    ai_reply = self.context.ai.get("reply", {})
+                    media_uuids = ai_reply.get("media_uuids", [])
+                    folder_names = ai_reply.get("folder_names", [])
+                    media_settings = ai_reply.get("media_settings", {})
+                else:
+                    # 使用模板节点的媒体配置
+                    media_uuids = [media.get("uuid") for media in template_media_list if media.get("uuid")]
+                    folder_names = []  # 模板节点目前不支持文件夹
+                    media_settings = template_media_settings
                 
                 print(f"  媒体信息: UUIDs={media_uuids}, Folders={folder_names}, Settings={media_settings}")
+                print(f"  模板消息数量: {len(template_message_templates)}")
+                print(f"  配对项目数量: {len(template_paired_items)}")
                 
                 # 根据 UUIDs 和 folder_names 获取实际的媒体 URL
                 media_urls = []
@@ -1917,12 +2152,103 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                     media_urls = await self._get_media_urls_from_identifiers(media_uuids, folder_names, user_id)
                     print(f"  📎 获取到 {len(media_urls)} 个媒体文件URL")
                 
-                # 处理媒体发送
-                if media_urls:
-                    send_separately = media_settings.get("send_media_separately", False)
+                # 处理多条消息模板
+                messages_to_send = []
+                if template_message_templates:
+                    # 使用模板节点的多条消息
+                    for template in template_message_templates:
+                        content = template.get("content", "")
+                        if content:
+                            messages_to_send.append(content)
+                    print(f"  📝 从模板节点获取到 {len(messages_to_send)} 条消息")
+                else:
+                    # 使用单条消息
+                    if message:
+                        messages_to_send.append(message)
+                    print(f"  📝 使用单条消息: '{message}'")
+                
+                if not messages_to_send:
+                    messages_to_send = ["您好！感谢您的咨询。"]
+                    print(f"  📝 使用默认消息")
+                
+                # 检查是否为配对发送模式
+                if template_paired_items and media_settings.get("paired_sending", False):
+                    print(f"  🔗 配对发送模式：处理 {len(template_paired_items)} 个配对项目")
+                    
+                    # 配对发送：逐个发送媒体-文本配对
+                    for i, paired_item in enumerate(template_paired_items):
+                        try:
+                            print(f"  📦 处理配对项目 {i+1}/{len(template_paired_items)}")
+                            
+                            media_item = paired_item.get("media")
+                            message_content = paired_item.get("message", "")
+                            has_media = paired_item.get("has_media", False)
+                            has_message = paired_item.get("has_message", False)
+                            
+                            if has_media and media_item:
+                                # 获取媒体URL
+                                media_uuid = media_item.get("uuid")
+                                if media_uuid:
+                                    paired_media_urls = await self._get_media_urls_from_identifiers([media_uuid], [], user_id)
+                                    if paired_media_urls:
+                                        media_url = paired_media_urls[0]
+                                        print(f"  🖼️ 发送配对媒体+文本: {media_url} + '{message_content}'")
+                                        
+                                        # 发送媒体和文本一起
+                                        result = await self.whatsapp_service.send_message(
+                                            to, message_content, user_id, 
+                                            media_url=media_url, media_type="image"
+                                        )
+                                        print(f"  ✅ 配对项目 {i+1} 发送成功: {result}")
+                                    else:
+                                        print(f"  ⚠️ 配对项目 {i+1} 媒体URL获取失败，只发送文本")
+                                        if has_message and message_content:
+                                            result = await self.whatsapp_service.send_message(to, message_content, user_id)
+                                            print(f"  ✅ 配对项目 {i+1} 文本发送成功: {result}")
+                                else:
+                                    print(f"  ⚠️ 配对项目 {i+1} 没有有效的媒体UUID")
+                                    if has_message and message_content:
+                                        result = await self.whatsapp_service.send_message(to, message_content, user_id)
+                                        print(f"  ✅ 配对项目 {i+1} 文本发送成功: {result}")
+                            elif has_message and message_content:
+                                # 只有文本，没有媒体
+                                print(f"  📝 发送配对文本: '{message_content}'")
+                                result = await self.whatsapp_service.send_message(to, message_content, user_id)
+                                print(f"  ✅ 配对项目 {i+1} 文本发送成功: {result}")
+                            else:
+                                print(f"  ⚠️ 配对项目 {i+1} 既没有媒体也没有文本，跳过")
+                            
+                            # 配对项目之间的延迟
+                            if i < len(template_paired_items) - 1:
+                                await asyncio.sleep(0.5)  # 配对项目间短暂延迟
+                                
+                        except Exception as e:
+                            print(f"  ❌ 配对项目 {i+1} 发送失败: {e}")
+                            continue
+                    
+                    # 配对发送完成，返回结果
+                    print(f"  🎉 配对发送完成，共处理 {len(template_paired_items)} 个项目")
+                    return {
+                        "ctx.message_id": "paired_sent",
+                        "ctx.sent_at": datetime.utcnow().isoformat(),
+                        "paired_items_count": len(template_paired_items)
+                    }
+                
+                # 处理媒体发送 - 模板消息默认先发送媒体再发送文本（与LLM节点逻辑一致）
+                elif media_urls:
+                    # 对于模板节点，默认采用分开发送模式（先媒体后文本）
+                    send_separately = media_settings.get("send_media_separately", True)  # 默认改为True
                     send_with_caption = media_settings.get("send_with_caption", True)
+                    use_first_media_only = media_settings.get("use_first_media_only", False)
                     delay_between_media = media_settings.get("delay_between_media", False)
                     delay_seconds = media_settings.get("delay_seconds", 2)
+                    
+                    print(f"  📋 模板消息媒体发送配置: 分开发送={send_separately}, 附带说明={send_with_caption}, 只用第一张={use_first_media_only}")
+                    
+                    # 如果设置为只使用第一张媒体，则只取第一个URL
+                    if use_first_media_only and media_urls:
+                        media_urls = [media_urls[0]]
+                        print(f"  📎 只使用第一张媒体: {media_urls[0]}")
                     
                     if send_separately:
                         # 分开发送：先发送媒体，再发送文本（确保媒体完全上传后再发送文字说明）
@@ -1959,41 +2285,114 @@ class SendWhatsAppMessageProcessor(NodeProcessor):
                         print(f"  ⏳ 最终等待 {final_wait_time} 秒确保所有媒体上传完成...")
                         await asyncio.sleep(final_wait_time)
                         
-                        # 所有媒体上传完成后，再发送文本消息
-                        print(f"  📝 媒体上传完成，现在发送文本消息")
-                        text_result = await self.whatsapp_service.send_message(to, message, user_id)
-                        print(f"  ✅ 文本消息发送结果: {text_result}")
+                        # 所有媒体上传完成后，再发送多条文本消息
+                        print(f"  📝 媒体上传完成，现在发送 {len(messages_to_send)} 条文本消息")
+                        for i, msg in enumerate(messages_to_send):
+                            if i > 0:
+                                await asyncio.sleep(2)  # 消息间延迟
+                            print(f"  📝 发送消息 {i+1}/{len(messages_to_send)}: '{msg}'")
+                            text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                            print(f"  ✅ 消息 {i+1} 发送结果: {text_result}")
                         
-                        result = text_result  # 使用文本消息的结果作为主要结果
+                        result = {"success": True, "message_id": "sent", "status": "sent"}
                     else:
                         # 一起发送：媒体附带文本说明
-                        if len(media_urls) == 1:
-                            # 单个媒体文件，附带文本
-                            caption = message if send_with_caption else ""
+                        if len(media_urls) == 1 and len(messages_to_send) == 1:
+                            # 单个媒体文件，附带单条文本
+                            caption = messages_to_send[0] if send_with_caption else ""
                             print(f"  🖼️📝 发送单个媒体附带文本: {media_urls[0]}")
                             result = await self.whatsapp_service.send_message(
                                 to, caption, user_id, media_url=media_urls[0], media_type="image"
                             )
                         else:
-                            # 多个媒体文件，先发送文本，再发送媒体
-                            print(f"  📝 多媒体模式：先发送文本消息")
-                            text_result = await self.whatsapp_service.send_message(to, message, user_id)
+                            # 多个媒体或多条消息的一起发送模式
+                            print(f"  🖼️📝 多媒体/多消息一起发送模式")
                             
-                            for i, media_url in enumerate(media_urls):
-                                if delay_between_media and i > 0:
-                                    print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
-                                    await asyncio.sleep(delay_seconds)
-                                
-                                print(f"  🖼️ 发送媒体 {i+1}/{len(media_urls)}: {media_url}")
-                                media_result = await self.whatsapp_service.send_message(
-                                    to, "", user_id, media_url=media_url, media_type="image"
+                            if use_first_media_only and media_urls:
+                                # 只使用第一张媒体 + 第一条文本，然后发送剩余文本
+                                media_url = media_urls[0]
+                                caption = messages_to_send[0] if messages_to_send and send_with_caption else ""
+                                print(f"  🖼️📝 发送第一张媒体附带第一条文本: {media_url}")
+                                result = await self.whatsapp_service.send_message(
+                                    to, caption, user_id, media_url=media_url, media_type="image"
                                 )
-                                print(f"  ✅ 媒体 {i+1} 发送结果: {media_result}")
+                                
+                                # 发送剩余的文本消息（如果有的话）
+                                if len(messages_to_send) > 1:
+                                    remaining_messages = messages_to_send[1:] if send_with_caption else messages_to_send
+                                    for i, msg in enumerate(remaining_messages):
+                                        await asyncio.sleep(1)  # 短暂延迟
+                                        print(f"  📝 发送剩余文本消息 {i+1}/{len(remaining_messages)}: '{msg}'")
+                                        text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                                        print(f"  ✅ 剩余文本消息 {i+1} 发送结果: {text_result}")
+                                elif not send_with_caption and messages_to_send:
+                                    # 如果不带说明，需要发送所有文本消息
+                                    for i, msg in enumerate(messages_to_send):
+                                        await asyncio.sleep(1)  # 短暂延迟
+                                        print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{msg}'")
+                                        text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                                        print(f"  ✅ 文本消息 {i+1} 发送结果: {text_result}")
+                            elif len(media_urls) == 1 and len(messages_to_send) > 1:
+                                # 一个媒体 + 多条文本
+                                if send_with_caption:
+                                    # 第一条文本作为媒体说明，其余文本单独发送
+                                    caption = messages_to_send[0]
+                                    print(f"  🖼️📝 发送媒体附带第一条消息: {media_urls[0]} + '{caption}'")
+                                    result = await self.whatsapp_service.send_message(
+                                        to, caption, user_id, media_url=media_urls[0], media_type="image"
+                                    )
+                                    
+                                    # 发送剩余的文本消息
+                                    for i, msg in enumerate(messages_to_send[1:], 1):
+                                        await asyncio.sleep(1)  # 短暂延迟
+                                        print(f"  📝 发送剩余消息 {i+1}/{len(messages_to_send)}: '{msg}'")
+                                        text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                                        print(f"  ✅ 剩余消息 {i+1} 发送结果: {text_result}")
+                                else:
+                                    # 不带说明：先发送媒体，再发送所有文本消息
+                                    print(f"  🖼️ 先发送媒体（不带说明）: {media_urls[0]}")
+                                    result = await self.whatsapp_service.send_message(
+                                        to, "", user_id, media_url=media_urls[0], media_type="image"
+                                    )
+                                    
+                                    # 然后发送所有文本消息
+                                    for i, msg in enumerate(messages_to_send):
+                                        await asyncio.sleep(1)  # 短暂延迟
+                                        print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{msg}'")
+                                        text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                                        print(f"  ✅ 文本消息 {i+1} 发送结果: {text_result}")
+                            else:
+                                # 多个媒体的情况：每个媒体都不带说明发送，然后发送所有文本
+                                print(f"  🖼️ 先发送 {len(media_urls)} 个媒体文件（不带说明）")
+                                for i, media_url in enumerate(media_urls):
+                                    if i > 0:
+                                        await asyncio.sleep(1)
+                                    print(f"  🖼️ 发送媒体 {i+1}/{len(media_urls)}: {media_url}")
+                                    media_result = await self.whatsapp_service.send_message(
+                                        to, "", user_id, media_url=media_url, media_type="image"
+                                    )
+                                    print(f"  ✅ 媒体 {i+1} 发送结果: {media_result}")
+                                
+                                # 然后发送所有文本消息
+                                print(f"  📝 然后发送 {len(messages_to_send)} 条文本消息")
+                                for i, msg in enumerate(messages_to_send):
+                                    await asyncio.sleep(1)
+                                    print(f"  📝 发送消息 {i+1}/{len(messages_to_send)}: '{msg}'")
+                                    text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                                    print(f"  ✅ 消息 {i+1} 发送结果: {text_result}")
                             
-                            result = text_result
+                            result = {"success": True, "message_id": "sent", "status": "sent"}
                 else:
-                    # 没有媒体，只发送文本
-                    result = await self.whatsapp_service.send_message(to, message, user_id)
+                    # 没有媒体，只发送多条文本消息
+                    print(f"  📝 发送 {len(messages_to_send)} 条纯文本消息")
+                    for i, msg in enumerate(messages_to_send):
+                        if i > 0:
+                            await asyncio.sleep(2)  # 消息间延迟
+                        print(f"  📝 发送消息 {i+1}/{len(messages_to_send)}: '{msg}'")
+                        text_result = await self.whatsapp_service.send_message(to, msg, user_id)
+                        print(f"  ✅ 消息 {i+1} 发送结果: {text_result}")
+                    
+                    result = {"success": True, "message_id": "sent", "status": "sent"}
                 
                 print(f"  ✅ 最终发送结果: {result}")
                 
@@ -2229,60 +2628,115 @@ class TemplateProcessor(NodeProcessor):
     """模板消息节点 - 支持数据库变量查询"""
     
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
-        """生成模板消息"""
+        """生成模板消息 - 支持多条消息和媒体"""
         try:
             # 获取模板配置 - 从node的data字段中获取
             node_data = node_config.get("data", {})
-            template_type = node_data.get("template_type", "text")
-            template_name = node_data.get("template_name")
-            template_language = node_data.get("template_language", "zh_CN")
-            variables = node_data.get("variables", {})
-            fallback_template = node_data.get("fallback_template", "您好！感谢您的咨询。")
             
-            # print(f"🔍 Template节点数据结构检查:") # Remove verbose template node data check
-            # print(f"  完整node_config keys: {list(node_config.keys())}") # Remove verbose template node data check
-            # print(f"  node_data keys: {list(node_data.keys())}") # Remove verbose template node data check
-            # print(f"  variables类型: {type(variables)}, 值: {variables}") # Remove verbose template node data check
+            # 新的多消息模板支持
+            message_templates = node_data.get("message_templates", [])
             
-            # 解析变量
-            resolved_variables = {}
-            # print(f"🔍 模板变量解析开始:") # Remove verbose template variable parsing start
-            # print(f"  原始变量: {variables}") # Remove verbose original variables print
-            for var_key, var_expression in variables.items():
-                resolved_value = await self._resolve_variable(var_expression)
-                resolved_variables[var_key] = resolved_value
-                # print(f"  {var_key}: '{var_expression}' → '{resolved_value}'") # Remove verbose individual variable resolution print
-            # print(f"  解析结果: {resolved_variables}") # Remove verbose resolved variables print
+            # 媒体配置
+            media_list = node_data.get("media_list", [])
+            media_send_mode = node_data.get("media_send_mode", "together_with_caption")
+            media_settings = node_data.get("media_settings", {})
             
-            # WhatsApp 模板消息
-            if template_type == "whatsapp" and template_name:
-                return {
-                    "template_data": {
-                        "template_name": template_name,
-                        "template_language": template_language,
-                        "variables": resolved_variables
-                    },
-                    "fallback_text": self._apply_template(fallback_template, resolved_variables),
-                    "message_content": self._apply_template(fallback_template, resolved_variables),
-                    "message_type": "template"
+            # 兼容旧版本的单模板
+            if not message_templates:
+                # 如果没有新的消息模板，尝试使用旧的字段
+                old_template = node_data.get("template", "")
+                fallback_template = node_data.get("fallback_template", "您好！感谢您的咨询。")
+                
+                if old_template:
+                    message_templates = [{"id": 1, "content": old_template}]
+                elif fallback_template:
+                    message_templates = [{"id": 1, "content": fallback_template}]
+            
+            print(f"🔍 Template节点配置:")
+            print(f"  消息模板数量: {len(message_templates)}")
+            print(f"  媒体文件数量: {len(media_list)}")
+            print(f"  媒体发送模式: {media_send_mode}")
+            
+            # 处理多条消息模板
+            processed_messages = []
+            for i, template in enumerate(message_templates):
+                template_content = template.get("content", "")
+                if template_content:
+                    # 应用变量替换
+                    processed_content = self._apply_template_variables(template_content)
+                    processed_messages.append({
+                        "index": i,
+                        "content": processed_content,
+                        "original": template_content
+                    })
+                    print(f"  消息 #{i+1}: '{processed_content}'")
+            
+            # 如果没有有效的消息模板，使用默认消息
+            if not processed_messages:
+                processed_messages = [{
+                    "index": 0,
+                    "content": "您好！感谢您的咨询。",
+                    "original": "您好！感谢您的咨询。"
+                }]
+            
+            # 构建返回结果 - 设置默认的媒体发送配置（与LLM节点一致）
+            if media_list and not media_settings:
+                # 如果有媒体但没有设置，使用默认配置：先发送媒体，再发送文本
+                media_settings = {
+                    "send_media_separately": True,  # 默认分开发送
+                    "send_with_caption": True,      # 默认附带说明
+                    "delay_between_media": False,   # 默认不延迟
+                    "delay_seconds": 2              # 默认延迟2秒
+                }
+                print(f"  🔧 设置默认媒体发送配置: {media_settings}")
+            
+            # 根据媒体发送模式处理配对逻辑
+            if media_settings.get("paired_sending", False) and media_list and processed_messages:
+                # 配对发送模式：创建媒体-文本配对
+                paired_items = []
+                max_items = max(len(media_list), len(processed_messages))
+                
+                for i in range(max_items):
+                    media_item = media_list[i] if i < len(media_list) else None
+                    message_item = processed_messages[i] if i < len(processed_messages) else None
+                    
+                    paired_items.append({
+                        "index": i,
+                        "media": media_item,
+                        "message": message_item["content"] if message_item else "",
+                        "has_media": media_item is not None,
+                        "has_message": message_item is not None
+                    })
+                
+                print(f"  🔗 配对发送模式：创建了 {len(paired_items)} 个媒体-文本配对")
+                
+                result = {
+                    "message_templates": processed_messages,
+                    "message_content": processed_messages[0]["content"] if processed_messages else "您好！感谢您的咨询。",
+                    "message_type": "template",
+                    "media_list": media_list,
+                    "media_send_mode": media_send_mode,
+                    "media_settings": media_settings,
+                    "paired_items": paired_items  # 新增配对项目
                 }
             else:
-                # 普通文本消息
-                # print(f"📝 应用模板:") # Remove verbose template application start
-                # print(f"  模板: '{fallback_template}'") # Remove verbose template print
-                # print(f"  变量: {resolved_variables}") # Remove verbose variables print
-                message_text = self._apply_template(fallback_template, resolved_variables)
-                # print(f"  结果: '{message_text}'") # Remove verbose result print
-                return {
-                    "ai.reply.reply_text": message_text,
-                    "message_content": message_text,
-                    "message_type": "text"
+                # 非配对模式：保持原有逻辑
+                result = {
+                    "message_templates": processed_messages,
+                    "message_content": processed_messages[0]["content"] if processed_messages else "您好！感谢您的咨询。",
+                    "message_type": "template",
+                    "media_list": media_list,
+                    "media_send_mode": media_send_mode,
+                    "media_settings": media_settings
                 }
+            
+            print(f"  ✅ 模板处理完成，返回 {len(processed_messages)} 条消息")
+            return result
                 
         except Exception as e:
             logger.error(f"模板处理失败: {e}")
             return {
-                "ai.reply.reply_text": "抱歉，系统出现问题，请稍后再试。",
+                "message_content": "抱歉，系统出现问题，请稍后再试。",
                 "message_type": "text"
             }
     
@@ -2351,6 +2805,63 @@ class TemplateProcessor(NodeProcessor):
         ai_data = self.context.get("ai", {})
         return str(ai_data.get(field, ""))
     
+    def _apply_template_variables(self, template: str) -> str:
+        """应用模板变量替换 - 新版本"""
+        if not template:
+            return ""
+        
+        import re
+        
+        def replace_variable(match):
+            var_expr = match.group(0)  # 完整的 {{trigger.name}} 表达式
+            try:
+                # 去掉 {{ }}
+                inner_expr = var_expr[2:-2].strip()
+                
+                if inner_expr.startswith("trigger."):
+                    field = inner_expr[8:]  # 去掉 "trigger."
+                    trigger_data = self.context.get("trigger_data", {})
+                    
+                    # 字段映射
+                    if field == "content":
+                        value = str(trigger_data.get("message", ""))
+                    elif field == "message":
+                        value = str(trigger_data.get("message", ""))
+                    elif field == "name":
+                        value = str(trigger_data.get("name", ""))
+                    elif field == "phone":
+                        value = str(trigger_data.get("phone", ""))
+                    else:
+                        value = str(trigger_data.get(field, ""))
+                    
+                    return value
+                    
+                elif inner_expr.startswith("db.customer."):
+                    # 数据库客户字段
+                    field = inner_expr[12:]  # 去掉 "db.customer."
+                    customer_data = self.context.get("customer", {})
+                    if hasattr(customer_data, field):
+                        value = getattr(customer_data, field)
+                        return str(value) if value is not None else ""
+                    return ""
+                    
+                elif inner_expr.startswith("company."):
+                    # 公司信息字段
+                    field = inner_expr[8:]  # 去掉 "company."
+                    # 这里可以添加公司信息的获取逻辑
+                    return ""
+                
+                # 如果不能解析，保持原样
+                return var_expr
+                
+            except Exception as e:
+                print(f"    变量替换失败 {var_expr}: {e}")
+                return var_expr
+        
+        # 使用正则表达式替换所有 {{...}} 表达式
+        result = re.sub(r'''\{\{(.*?)\}\}''', replace_variable, template)
+        return result
+
     def _apply_template(self, template: str, resolved_variables: dict) -> str:
         """应用变量到模板 - resolved_variables应该是解析后的实际值"""
         result = template
@@ -3311,12 +3822,55 @@ class CustomAPIProcessor(NodeProcessor):
             headers[k] = resolved_value
             print(f"    替换后 Header {k}: {resolved_value}")
         
+        # 处理智能变量
+        print(f"\n  🧠 处理智能变量:")
+        smart_variables = node_data.get("smart_variables", {})
+        processed_smart_vars = {}
+        
+        if smart_variables:
+            print(f"    找到 {len(smart_variables)} 个智能变量")
+            for var_name, var_config in smart_variables.items():
+                source = var_config.get("source", "")
+                transformer = var_config.get("transformer", "None")
+                
+                if source:
+                    print(f"    处理变量: {var_name}")
+                    print(f"      数据源: {source}")
+                    print(f"      转换器: {transformer}")
+                    
+                    # 解析数据源
+                    resolved_value = self._resolve_text_variables(source)
+                    print(f"      解析后值: {resolved_value}")
+                    
+                    # 应用转换器
+                    if transformer and transformer != "None" and resolved_value:
+                        transformed_value = self._apply_transformer(str(resolved_value), transformer)
+                        print(f"      转换后值: {transformed_value}")
+                        processed_smart_vars[var_name] = transformed_value
+                    else:
+                        processed_smart_vars[var_name] = resolved_value
+                else:
+                    print(f"    跳过变量 {var_name}: 无数据源")
+            
+            print(f"    处理完成的智能变量: {processed_smart_vars}")
+        else:
+            print(f"    无智能变量配置")
+        
         print(f"\n  🔄 Body 变量替换:")
         body = None
         if body_template:
             print(f"    原始 Body: {body_template}")
-            body = self._resolve_json_body_from_context(body_template)
-            print(f"    替换后 Body: {body}")
+            # 先替换智能变量，再替换其他变量
+            body_with_smart_vars = body_template
+            for var_name, var_value in processed_smart_vars.items():
+                placeholder = f"{{{{{var_name}}}}}"
+                if placeholder in body_with_smart_vars:
+                    print(f"      替换智能变量: {placeholder} -> {var_value}")
+                    body_with_smart_vars = body_with_smart_vars.replace(placeholder, str(var_value))
+            
+            print(f"    智能变量替换后: {body_with_smart_vars}")
+            body = self._resolve_json_body_from_context(body_with_smart_vars)
+            print(f"    最终 Body: {body}")
         else:
             print(f"    无 Body 模板")
 
@@ -3554,6 +4108,8 @@ class WorkflowEngine:
         self.db = db
         self.processors = {
             "MessageTrigger": MessageTriggerProcessor,
+            "DbTrigger": DbTriggerProcessor,  # 新增：数据库触发器处理器
+            "StatusTrigger": DbTriggerProcessor,  # 向后兼容：旧的StatusTrigger使用DbTrigger处理器
             "AI": AIProcessor,
             "Condition": ConditionProcessor,
             "UpdateDB": UpdateDBProcessor,
@@ -3597,7 +4153,7 @@ class WorkflowEngine:
                     workflow_id=workflow_id,
                     status="running",
                     triggered_by=trigger_data.get("trigger_type", "manual"),
-                    execution_data=trigger_data,
+                    execution_data=serialize_for_json(trigger_data),  # 序列化触发数据
                     user_id=workflow.user_id,
                     started_at=execution_start_time
                 )

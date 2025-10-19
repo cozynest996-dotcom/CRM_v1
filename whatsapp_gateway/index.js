@@ -244,13 +244,64 @@ function initClientForUser(userId) {
         console.log(`🚫 忽略群组消息来自: ${msg.from}`);
         return; // 忽略群组消息
       }
+      
+      // 静默忽略无用的消息类型
+      const ignoredSenders = [
+        'status@c.us',           // WhatsApp Status
+        'status@broadcast',      // Status 广播
+        'broadcast',             // 广播消息
+        'announcement',          // 公告消息
+      ];
+      
+      // 检查是否应该忽略此消息
+      const shouldIgnore = ignoredSenders.some(sender => 
+        msg.from === sender || msg.from.includes(sender)
+      );
+      
+      if (shouldIgnore) {
+        return; // 静默忽略，不产生任何日志
+      }
+      
+      let messageContent = msg.body;
+      let mediaBase64 = null;
+      let mediaType = null;
+
+      // 调试：打印消息类型和媒体信息
+      console.log(`🔍 User ${userId} 消息调试信息:`, {
+        hasMedia: msg.hasMedia,
+        type: msg.type,
+        body: msg.body,
+        isVoice: msg.type === 'voice',
+        isAudio: msg.type === 'audio',
+        isPtt: msg.type === 'ptt'
+      });
+
+      // 检查是否是语音消息 (包括 PTT - Push-to-Talk)
+      if (msg.hasMedia && (msg.type === 'voice' || msg.type === 'audio' || msg.type === 'ptt')) {
+        try {
+          console.log(`🎤 User ${userId} 收到语音消息，正在下载媒体...`);
+          const media = await msg.downloadMedia();
+          if (media && media.data) {
+            mediaBase64 = media.data; // media.data 是 Base64 字符串
+            mediaType = media.mimetype;
+            console.log(`✅ User ${userId} 语音消息下载成功，类型: ${mediaType}, 大小: ${mediaBase64.length} 字节`);
+            // 对于语音消息，将 content 设置为提示用户转录中
+            messageContent = "🎤 [语音消息，正在转录...]";
+          }
+        } catch (mediaError) {
+          console.error(`❌ User ${userId} 下载语音消息失败:`, mediaError);
+          messageContent = "❌ [语音消息下载失败]";
+        }
+      }
       // existing message handler body
       const startTime = Date.now();
       console.log(`📩 ${startTime} - User ${userId} 收到WhatsApp消息:`, {
         from: msg.from,
-        content: msg.body,
+        content: messageContent,
         messageId: msg.id.id,
-        timestamp: msg.timestamp
+        timestamp: msg.timestamp,
+        mediaType: mediaType ? mediaType : "none", // 添加媒体类型日志
+        mediaSize: mediaBase64 ? mediaBase64.length : 0 // 添加媒体大小日志
       });
       try {
         const contact = await msg.getContact();
@@ -284,14 +335,17 @@ function initClientForUser(userId) {
         
         const inboxPayload = {
           phone: msg.from.replace("@c.us", ""),
-          content: msg.body,
+          content: messageContent, // 使用处理后的 content
           name: name,
           user_id: userId,
-          chat_history: chatHistory // 新增聊天历史字段
+          chat_history: chatHistory, // 新增聊天历史字段
+          media_base64: mediaBase64, // 新增媒体Base64数据
+          media_type: mediaType // 新增媒体类型
         };
         console.log("📤 推送消息到后端:", {
           ...inboxPayload,
-          chat_history: `${chatHistory.length} messages` // 简化日志输出
+          chat_history: `${chatHistory.length} messages`, // 简化日志输出
+          media_base64: mediaBase64 ? `[Base64 Data, length: ${mediaBase64.length}]` : "none" // 简化日志输出
         });
         fetch("http://backend:8000/api/messages/inbox", {
           method: "POST",
@@ -386,16 +440,20 @@ function initClientForUser(userId) {
   (async () => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       console.log(`🔄 initClientForUser user ${userId} attempt ${attempt}/${maxAttempts}`);
-      // clean locks before attempt
-      try {
-        const authPath = getUserAuthPath(userId);
-        if (fs.existsSync(authPath)) {
-          // 在每次尝试初始化之前，强制删除整个用户会话目录，确保每次都从干净状态开始
-          fs.rmSync(authPath, { recursive: true, force: true });
-          console.log(`🗑️ Removed auth directory for user ${userId} before attempt ${attempt} to ensure clean state`);
+      // 只在第一次尝试失败后才清理会话，保留现有会话以实现自动重连
+      if (attempt > 1) {
+        try {
+          const authPath = getUserAuthPath(userId);
+          if (fs.existsSync(authPath)) {
+            console.log(`🗑️ 第${attempt}次尝试：清理会话目录以重新开始`);
+            fs.rmSync(authPath, { recursive: true, force: true });
+            console.log(`🗑️ Removed auth directory for user ${userId} after failed attempt`);
+          }
+        } catch (e) {
+          console.warn('⚠️ Failed to clean auth directory:', e && e.message ? e.message : e);
         }
-      } catch (e) {
-        console.warn('⚠️ Failed to pre-clean Chromium lock files/auth directory:', e && e.message ? e.message : e);
+      } else {
+        console.log(`🔄 第${attempt}次尝试：保留现有会话以实现自动重连`);
       }
 
       const state = createClientState();
@@ -643,22 +701,27 @@ app.get("/status", authenticateUser, (req, res) => {
   const userId = req.user_id; // 從 JWT token 獲取，確保隔離
   const state = clients[userId];
   
+  // 检查是否有保存的 session 文件
+  const authPath = getUserAuthPath(userId);
+  const hasSession = fs.existsSync(authPath) && fs.readdirSync(authPath).length > 0;
+  
   if (state) {
     return res.json({ 
       ready: state.ready, 
       need_qr: state.needQR, 
       session_active: state.ready,
+      has_session: hasSession, // 添加 session 存在标识
       user_id: userId, // 確認回傳正確用戶
       qr: state.qr // 在状态查询中也返回 QR 码，如果存在的话
     });
   }
   
-  // 用戶沒有 client：不要自動初始化（避免前端輪詢導致重複初始化）
-  // 前端應請求 /qr 或由用戶操作觸發初始化
+  // 用戶沒有 client：检查是否有保存的 session
   return res.json({
     ready: false,
-    need_qr: true,
+    need_qr: !hasSession, // 如果有 session 就不需要 QR，如果没有 session 才需要 QR
     session_active: false,
+    has_session: hasSession, // 添加 session 存在标识
     user_id: userId,
     qr: null // 明确返回 null，避免前端显示旧的QR
   });
@@ -699,24 +762,61 @@ app.get("/qr", authenticateUser, async (req, res) => { // 将此路由改为 asy
   });
 });
 
-// ✅ 登出 API (需要身份驗證)
+// 🔄 软登出 API - 只断开连接，保留会话以便自动重连
 app.post("/logout", authenticateUser, async (req, res) => {
-  const user_id = req.user_id; // 從 JWT token 獲取，確保用戶只能登出自己
+  const user_id = req.user_id;
+  const force_delete = req.body.force_delete || false; // 可选：强制删除会话
 
   try {
-    console.log(`🔄 User ${user_id} logout requested`);
+    console.log(`🔄 User ${user_id} logout requested (force_delete: ${force_delete})`);
 
-    // user_id 已從 JWT 獲得，一定存在
-
-    // 使用 cleanupUserSession 統一處理
-    await cleanupUserSession(user_id); // 这会删除 auth 目录并销毁客户端
-
-    // 自动重新初始化客户端以生成新的 QR（短延遲，便於前端立即獲取）
-    setTimeout(async () => { // 使用 async function
+    const userState = clients[user_id];
+    if (userState?.client) {
       try {
-        console.log(`🔄 Auto reinitializing WhatsApp client for user ${user_id} after logout`);
-        // 强制重新初始化，因为 cleanupUserSession 已经删除了会话文件
-        await initClientForUser(user_id); // 等待初始化完成
+        // 只断开连接，不删除会话文件
+        await userState.client.logout();
+        await userState.client.destroy();
+        console.log(`✅ Client disconnected for user ${user_id}`);
+      } catch (err) {
+        console.warn(`⚠️ Error disconnecting client for user ${user_id}:`, err.message);
+      }
+    }
+
+    // 清除内存状态
+    delete clients[user_id];
+    try { authLogSeen.delete(String(user_id)); } catch (e) {}
+
+    // 只有在强制删除时才删除会话文件
+    if (force_delete) {
+      const authPath = getUserAuthPath(user_id);
+      try {
+        if (fs.existsSync(authPath)) {
+          fs.rmSync(authPath, { recursive: true, force: true });
+          console.log(`🗑️ Force deleted auth directory for user ${user_id}`);
+        }
+      } catch (err) {
+        console.warn(`⚠️ Error removing auth directory for user ${user_id}:`, err.message);
+      }
+    } else {
+      console.log(`💾 保留会话文件以便自动重连 for user ${user_id}`);
+    }
+
+    // 通知后端
+    try {
+      await fetch('http://backend:8000/settings/whatsapp/session/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: user_id, qr: null, connected: false })
+      });
+    } catch (err) {
+      console.warn(`⚠️ Failed to update backend for user ${user_id}:`, err.message);
+    }
+
+    // 短延迟后自动重新初始化（会尝试使用保存的会话）
+    setTimeout(async () => {
+      try {
+        console.log(`🔄 Auto reinitializing WhatsApp client for user ${user_id}`);
+        await initClientForUser(user_id);
       } catch (err) {
         console.warn(`Failed to auto-init client for user ${user_id}:`, err && err.message ? err.message : err);
       }
@@ -724,7 +824,9 @@ app.post("/logout", authenticateUser, async (req, res) => {
 
     res.json({
       success: true,
-      message: "Logged out successfully. Please scan QR code to reconnect."
+      message: force_delete ? 
+        "Logged out and session deleted. Please scan QR code to reconnect." :
+        "Logged out but session preserved. Should auto-reconnect if session is valid."
     });
 
   } catch (error) {
@@ -732,6 +834,40 @@ app.post("/logout", authenticateUser, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Logout failed: " + (error && error.message ? error.message : String(error))
+    });
+  }
+});
+
+// 🗑️ 强制删除会话 API - 完全删除会话文件，需要重新扫码
+app.post("/reset-session", authenticateUser, async (req, res) => {
+  const user_id = req.user_id;
+
+  try {
+    console.log(`🗑️ User ${user_id} session reset requested`);
+
+    // 完全清理会话
+    await cleanupUserSession(user_id);
+
+    // 短延迟后重新初始化（会需要新的 QR 码）
+    setTimeout(async () => {
+      try {
+        console.log(`🔄 Reinitializing WhatsApp client for user ${user_id} after session reset`);
+        await initClientForUser(user_id);
+      } catch (err) {
+        console.warn(`Failed to init client after reset for user ${user_id}:`, err && err.message ? err.message : err);
+      }
+    }, 1200);
+
+    res.json({
+      success: true,
+      message: "Session completely reset. Please scan new QR code to reconnect."
+    });
+
+  } catch (error) {
+    console.error(`❌ User ${user_id} session reset failed:`, error);
+    res.status(500).json({
+      success: false,
+      message: "Session reset failed: " + (error && error.message ? error.message : String(error))
     });
   }
 });

@@ -37,12 +37,12 @@ export const TimeTriggerNode = ({ data, selected }: { data: any; selected: boole
   }} selected={selected} config={config} />
 }
 
-export const StatusTriggerNode = ({ data, selected }: { data: any; selected: boolean }) => {
-  const config = nodeConfigs.StatusTrigger
+export const DbTriggerNode = ({ data, selected }: { data: any; selected: boolean }) => {
+  const config = nodeConfigs.DbTrigger
   return <BaseNode data={{
     ...data,
-    description: '状态触发',
-    content: data.config?.table ? `📊 ${data.config.table}.${data.config.field}` : '等待状态变化...'
+    description: '数据库触发器',
+    content: data.config?.table ? `🗄️ ${data.config.table}.${data.config.field} = ${data.config.value || '*'}` : '等待数据库变化...'
   }} selected={selected} config={config} />
 }
 

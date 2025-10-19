@@ -168,6 +168,77 @@ export default function AutomationPage() {
     }
   }
 
+  const handleImportFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const fileContent = await file.text();
+      const importData = JSON.parse(fileContent);
+      
+      // 确保导入数据是数组，即使只导入一个工作流也包装成数组
+      const dataToSend = Array.isArray(importData) ? importData : [importData];
+
+      const response = await api.post('/api/workflows/import', dataToSend);
+      console.log('Automation - 导入工作流响应:', response);
+      alert('工作流导入成功！');
+      await loadWorkflows();
+    } catch (error) {
+      console.error('Automation - 导入工作流失败:', error);
+      alert('导入失败，请重试：' + (error as any)?.message);
+    }
+  };
+
+  const handleExportAllWorkflows = async () => {
+    try {
+      console.log('开始导出工作流...');
+      
+      // 使用原生 fetch 确保没有缓存问题
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch('http://localhost:8000/api/workflows/export', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      console.log('Automation - 导出工作流响应:', data);
+      console.log('响应类型:', typeof data);
+      console.log('响应是否为数组:', Array.isArray(data));
+      
+      if (!data) {
+        throw new Error('服务器返回空响应');
+      }
+      
+      // 将 JSON 数据转换为字符串，然后创建 Blob
+      const jsonString = JSON.stringify(data, null, 2);
+      console.log('JSON 字符串长度:', jsonString.length);
+      console.log('JSON 字符串预览:', jsonString.substring(0, 200));
+      
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+      
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', 'workflows.json');
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      alert('工作流导出成功！');
+    } catch (error) {
+      console.error('Automation - 导出工作流失败:', error);
+      alert('导出失败，请重试：' + (error as any)?.message);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: '#f7fafc' }}>
       <Sidebar currentPage="/automation" />
@@ -187,20 +258,57 @@ export default function AutomationPage() {
           {/* 工作流列表 */}
           <div style={{ marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2 style={{ fontSize: '20px', fontWeight: '600', color: '#2d3748' }}>我的工作流</h2>
-            <button
-              onClick={handleCreateWorkflow}
-              style={{
-                padding: '10px 20px',
-                backgroundColor: '#4299e1',
-                color: 'white',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer',
-                fontWeight: '500'
-              }}
-            >
-              + 创建工作流
-            </button>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <input
+                type="file"
+                accept=".json"
+                style={{ display: 'none' }}
+                id="import-workflow-file"
+                onChange={handleImportFileChange}
+              />
+              <button
+                onClick={() => document.getElementById('import-workflow-file')?.click()}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#6c757d',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontWeight: '500'
+                }}
+              >
+                📥 导入工作流
+              </button>
+              <button
+                onClick={handleExportAllWorkflows}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#6c757d',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontWeight: '500'
+                }}
+              >
+                📤 导出所有工作流
+              </button>
+              <button
+                onClick={handleCreateWorkflow}
+                style={{
+                  padding: '10px 20px',
+                  backgroundColor: '#4299e1',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontWeight: '500'
+                }}
+              >
+                + 创建工作流
+              </button>
+            </div>
           </div>
 
           {loading ? (

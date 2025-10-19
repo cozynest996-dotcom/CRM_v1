@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? React.useLayoutEffect : React.useEffect
 import useSWR from 'swr'
-import { formatMessageTime, formatMessageDate, shouldShowDateSeparator, formatFullDateTime } from '../utils/dateFormat'
+import { formatMessageTime, formatMessageDate, shouldShowDateSeparator, formatFullDateTime, formatCustomerListTime } from '../utils/dateFormat'
 import Sidebar from '../components/Sidebar'
 import { useAuth } from '../hooks/useAuth'
 import { useWhatsAppAutoConnect } from '../hooks/useWhatsAppAutoConnect'
@@ -71,11 +71,7 @@ export default function HomePage() {
   // 🚀 自動連接 WhatsApp
   const { isConnecting, connectionStatus, error } = useWhatsAppAutoConnect()
   
-  const { data: customers, mutate: mutateCustomers } = useSWR(`${API_BASE}/api/customers/summary`, fetcher, {
-    refreshInterval: 0,  // 禁用自动刷新
-    revalidateOnFocus: false  // 禁用焦点刷新
-  })
-
+  // State definitions
   const [selectedCustomer, setSelectedCustomer] = useState<string | null>(null)
   const [text, setText] = useState('')
   const [customerDetail, setCustomerDetail] = useState<any | null>(null)
@@ -83,11 +79,26 @@ export default function HomePage() {
   const [phoneValue, setPhoneValue] = useState('')
   const [emailValue, setEmailValue] = useState('')
   const [isEditing, setIsEditing] = useState(false)
-  const { data: stages } = useSWR(`${API_BASE}/api/pipeline/stages`, fetcher, { refreshInterval: 0 })
+  const [selectedChannel, setSelectedChannel] = useState<'whatsapp' | 'telegram'>('whatsapp') // 新增：用于选择发送渠道
+  const [searchQuery, setSearchQuery] = useState('') // 新增：搜索查询
+  
+  // Refs
   const messagesContainerRef = React.useRef<HTMLDivElement>(null)
   const messagesEndRef = React.useRef<HTMLDivElement>(null)
   const prevSelectedRef = React.useRef<string | null>(null)
   const justSwitchedRef = React.useRef(false)
+
+  // SWR hooks
+  const { data: customers, mutate: mutateCustomers } = useSWR(
+    `${API_BASE}/api/customers/summary${searchQuery ? `?search=${encodeURIComponent(searchQuery)}` : ''}`, 
+    fetcher, 
+    {
+      refreshInterval: 0,  // 禁用自动刷新
+      revalidateOnFocus: false  // 禁用焦点刷新
+    }
+  )
+
+  const { data: stages } = useSWR(`${API_BASE}/api/pipeline/stages`, fetcher, { refreshInterval: 0 })
 
   const { data: messages, mutate: mutateMessages } = useSWR(
     selectedCustomer ? `${API_BASE}/api/messages/${selectedCustomer}` : null,
@@ -262,7 +273,7 @@ export default function HomePage() {
       const res = await fetch(`${API_BASE}/api/messages/send`, {
         method: 'POST',
         headers: getAuthHeaders(),
-        body: JSON.stringify({ customer_id: selectedCustomer, content: optimistic.content })
+        body: JSON.stringify({ customer_id: selectedCustomer, content: optimistic.content, channel: selectedChannel })
       })
 
       if (!res.ok) {
@@ -302,11 +313,41 @@ export default function HomePage() {
         display: 'flex',
         paddingTop: 48 // leave space for fixed header
       }}>
-        <div style={{ width: 300, padding: 12 }}>
+        <div style={{ width: 300, padding: 12, background: '#f8f9fa', borderRight: '1px solid #e9ecef' }}>
           <SidebarComponent>
-          {!customers && <div>Loading...</div>}
+            {/* 搜索框 */}
+            <div style={{ marginBottom: 16 }}>
+              <input
+                type="text"
+                placeholder="搜索客户..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '8px 12px',
+                  border: '1px solid #dee2e6',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  backgroundColor: '#ffffff',
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                }}
+              />
+            </div>
+            {!customers && <div style={{ textAlign: 'center', padding: 20, color: '#6c757d' }}>Loading...</div>}
           {customers?.map((c: any) => (
-            <div key={c.id} style={{ padding: 8, cursor: 'pointer', background: c.id === selectedCustomer ? '#e8f0ff' : 'transparent', borderRadius: 6, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }} onClick={async () => {
+            <div key={c.id} style={{ 
+              padding: 12, 
+              cursor: 'pointer', 
+              background: c.id === selectedCustomer ? '#007bff' : '#ffffff', 
+              borderRadius: 8, 
+              marginBottom: 8, 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: 12,
+              boxShadow: c.id === selectedCustomer ? '0 2px 8px rgba(0,123,255,0.3)' : '0 1px 3px rgba(0,0,0,0.1)',
+              border: '1px solid ' + (c.id === selectedCustomer ? '#007bff' : '#e9ecef'),
+              transition: 'all 0.2s ease'
+            }} onClick={async () => {
               // If clicking the already-selected customer, refresh detail + messages
               if (c.id === selectedCustomer) {
                 try {
@@ -351,12 +392,42 @@ export default function HomePage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
                 <img key={`list-avatar-${c.id}`} src={c.photo_url || PLACEHOLDER_AVATAR} alt="avatar" crossOrigin="anonymous" style={{ width: 44, height: 44, borderRadius: 22, objectFit: 'cover', backgroundColor: '#fff', display: 'block' }} onError={(e)=>{(e.target as HTMLImageElement).src=PLACEHOLDER_AVATAR}} />
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600 }}>{c.name || c.phone}</div>
-                  <div style={{ fontSize: 12, color: '#666' }}>{c.last_message ? (c.last_message.length > 40 ? c.last_message.substring(0, 40) + '...' : c.last_message) : c.phone}</div>
+                  <div style={{ 
+                    fontWeight: 600, 
+                    color: c.id === selectedCustomer ? '#ffffff' : '#212529',
+                    fontSize: '14px'
+                  }}>
+                    {c.name || c.phone}
+                  </div>
+                  <div style={{ 
+                    fontSize: 12, 
+                    color: c.id === selectedCustomer ? 'rgba(255,255,255,0.8)' : '#6c757d',
+                    marginTop: 2
+                  }}>
+                    {c.last_message ? (c.last_message.length > 35 ? c.last_message.substring(0, 35) + '...' : c.last_message) : c.phone}
+                  </div>
                 </div>
-                <div style={{ textAlign: 'right', minWidth: 64 }}>
-                  {c.unread_count > 0 && <div style={{ background: '#ff4d4f', color: 'white', borderRadius: 12, padding: '2px 8px', fontSize: 12 }}>{c.unread_count}</div>}
-                  <div style={{ fontSize: 11, color: '#999' }}>{c.last_timestamp ? formatMessageTime(c.last_timestamp) : ''}</div>
+                <div style={{ textAlign: 'right', minWidth: 64, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                  {c.unread_count > 0 && (
+                    <div style={{ 
+                      background: c.id === selectedCustomer ? '#ffffff' : '#dc3545', 
+                      color: c.id === selectedCustomer ? '#007bff' : 'white', 
+                      borderRadius: 10, 
+                      padding: '2px 6px', 
+                      fontSize: 11,
+                      fontWeight: '600',
+                      minWidth: 18,
+                      textAlign: 'center'
+                    }}>
+                      {c.unread_count}
+                    </div>
+                  )}
+                  <div style={{ 
+                    fontSize: 11, 
+                    color: c.id === selectedCustomer ? 'rgba(255,255,255,0.7)' : '#6c757d'
+                  }}>
+                    {formatCustomerListTime(c.last_timestamp)}
+                  </div>
                 </div>
               </div>
             </div>
@@ -365,7 +436,13 @@ export default function HomePage() {
         </div>
 
         <ChatWindow>
-          <div ref={messagesContainerRef} style={{ flex: 1, overflow: 'auto', visibility: messages ? 'visible' : 'hidden' }}>
+          <div ref={messagesContainerRef} style={{ 
+            flex: 1, 
+            overflow: 'auto', 
+            visibility: messages ? 'visible' : 'hidden',
+            background: '#f8f9fa',
+            padding: '16px'
+          }}>
             {selectedCustomer && (
               <>
                 {!messages && <div>Loading messages...</div>}
@@ -401,10 +478,14 @@ export default function HomePage() {
                         <div style={{
                           display: 'inline-block',
                           maxWidth: '70%',
-                          padding: '8px 12px',
-                          borderRadius: '18px',
-                          backgroundColor: m.direction === 'outbound' ? '#007bff' : '#f1f1f1',
-                          color: m.direction === 'outbound' ? 'white' : 'black'
+                          padding: '12px 16px',
+                          borderRadius: m.direction === 'outbound' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                          backgroundColor: m.direction === 'outbound' ? '#007bff' : '#ffffff',
+                          color: m.direction === 'outbound' ? 'white' : '#212529',
+                          boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                          border: m.direction === 'outbound' ? 'none' : '1px solid #e9ecef',
+                          position: 'relative',
+                          wordWrap: 'break-word' // 确保长文本自动换行
                         }}>
                           <div>{m.content}</div>
                           <div style={{
@@ -417,6 +498,13 @@ export default function HomePage() {
                             justifyContent: 'flex-end',
                             gap: '4px'
                           }}>
+                            {m.channel && (
+                              <img
+                                src={`/icons/${m.channel}.svg`}
+                                alt={m.channel}
+                                style={{ width: 16, height: 16 }}
+                              />
+                            )}
                             {formatMessageTime(m.timestamp)}
                             <AckIcon ack={m.ack} />
                           </div>
@@ -442,8 +530,36 @@ export default function HomePage() {
               style={{ width: '100%', height: 80 }} 
               placeholder="Type a message..." 
             />
-            <div style={{ textAlign: 'right', marginTop: 8 }}>
-              <button onClick={sendMessage}>Send</button>
+            <div style={{ textAlign: 'right', marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  onClick={() => setSelectedChannel('whatsapp')}
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    border: selectedChannel === 'whatsapp' ? '2px solid #007bff' : '1px solid #ccc',
+                    backgroundColor: selectedChannel === 'whatsapp' ? '#e8f0ff' : 'white',
+                    cursor: 'pointer',
+                    display: 'flex', alignItems: 'center'
+                  }}
+                >
+                  <img src="/icons/whatsapp.svg" alt="WhatsApp" style={{ width: 20, height: 20, marginRight: 5 }} /> WhatsApp
+                </button>
+                <button
+                  onClick={() => setSelectedChannel('telegram')}
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    border: selectedChannel === 'telegram' ? '2px solid #007bff' : '1px solid #ccc',
+                    backgroundColor: selectedChannel === 'telegram' ? '#e8f0ff' : 'white',
+                    cursor: 'pointer',
+                    display: 'flex', alignItems: 'center'
+                  }}
+                >
+                  <img src="/icons/telegram.svg" alt="Telegram" style={{ width: 20, height: 20, marginRight: 5 }} /> Telegram
+                </button>
+              </div>
+              <button onClick={sendMessage} style={{ padding: '8px 16px', borderRadius: '6px', background: '#007bff', color: 'white', border: 'none', cursor: 'pointer' }}>Send</button>
             </div>
           </div>
         </ChatWindow>
@@ -560,6 +676,108 @@ export default function HomePage() {
                   <option value="">None</option>
                   {(stages || []).map((s: any) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
                 </select>
+              </div>
+
+              {/* 新增：Telegram Chat ID */}
+              {customerDetail?.telegram_chat_id && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ marginBottom: 8 }}><strong>Telegram Chat ID</strong></div>
+                  <div style={{ 
+                    padding: 8, 
+                    background: '#f0f9ff', 
+                    borderRadius: 6, 
+                    fontFamily: 'monospace',
+                    fontSize: '14px',
+                    color: '#0088cc',
+                    border: '1px solid #bae6fd'
+                  }}>
+                    {customerDetail.telegram_chat_id}
+                  </div>
+                </div>
+              )}
+
+              {/* 新增：Status */}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ marginBottom: 8 }}><strong>Status</strong></div>
+                <select 
+                  disabled={detailLoading} 
+                  value={customerDetail?.status || ''} 
+                  onChange={async (e) => {
+                    const status = e.target.value
+                    try {
+                      const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, { 
+                        method: 'PATCH', 
+                        headers: getAuthHeaders(), 
+                        body: JSON.stringify({ status }) 
+                      })
+                      if (!res.ok) throw new Error('Failed')
+                      setCustomerDetail({ ...customerDetail, status })
+                      mutateCustomers()
+                    } catch (err) { console.error(err); alert('Save failed') }
+                  }} 
+                  style={{ width: '100%', padding: 8 }}
+                >
+                  <option value="">Select Status</option>
+                  <option value="new">New</option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                  <option value="blocked">Blocked</option>
+                </select>
+              </div>
+
+              {/* 新增：Unread Count */}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ marginBottom: 8 }}><strong>Unread Messages</strong></div>
+                <div style={{ 
+                  padding: 8, 
+                  background: customerDetail?.unread_count > 0 ? '#fef2f2' : '#f9fafb', 
+                  borderRadius: 6,
+                  color: customerDetail?.unread_count > 0 ? '#dc2626' : '#6b7280',
+                  fontWeight: '500'
+                }}>
+                  {customerDetail?.unread_count || 0} unread
+                </div>
+              </div>
+
+              {/* 新增：Custom Fields */}
+              {customerDetail?.custom_fields && Object.keys(customerDetail.custom_fields).length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <div style={{ marginBottom: 8 }}><strong>Custom Fields</strong></div>
+                  <div style={{ 
+                    padding: 8, 
+                    background: '#f8f9fa', 
+                    borderRadius: 6,
+                    border: '1px solid #e9ecef'
+                  }}>
+                    {Object.entries(customerDetail.custom_fields).map(([key, value]) => (
+                      <div key={key} style={{ 
+                        display: 'flex', 
+                        justifyContent: 'space-between', 
+                        marginBottom: 4,
+                        fontSize: '14px'
+                      }}>
+                        <span style={{ fontWeight: '500', color: '#495057' }}>{key}:</span>
+                        <span style={{ color: '#6c757d' }}>{String(value)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 新增：Customer ID */}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ marginBottom: 8 }}><strong>Customer ID</strong></div>
+                <div style={{ 
+                  padding: 8, 
+                  background: '#f8f9fa', 
+                  borderRadius: 6,
+                  fontFamily: 'monospace',
+                  fontSize: '12px',
+                  color: '#6c757d',
+                  border: '1px solid #e9ecef'
+                }}>
+                  {customerDetail?.id}
+                </div>
               </div>
 
             </div>

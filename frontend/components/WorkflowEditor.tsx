@@ -55,7 +55,7 @@ const getStatusStyle = (isActive: boolean, isSelected: boolean) => ({
 import {
   TriggerNode,
   TimeTriggerNode,
-  StatusTriggerNode,
+  DbTriggerNode,
   AINode,
   HandoffNode,
   UpdateDBNode,
@@ -240,13 +240,13 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
     const nodeTypeMap = {
       'message': 'MessageTrigger',
       'time': 'TimeTrigger', 
-      'status': 'StatusTrigger'
+      'status': 'DbTrigger'
     }
     
     const triggerLabels = {
       'message': '消息触发器',
       'time': '时间触发器',
-      'status': '状态触发器'
+      'status': '数据库触发器'
     }
     
     const newNode = {
@@ -661,6 +661,47 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
     setActiveNodeId(null)
   }
 
+  const handleImportSingleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const importedWorkflow = JSON.parse(e.target?.result as string);
+          setNodes(importedWorkflow.nodes || []);
+          setEdges(importedWorkflow.edges || []);
+          setWorkflowName(importedWorkflow.name || '新工作流');
+          setWorkflowDescription(importedWorkflow.description || '');
+          setIsEditMode(true); // 导入后自动进入编辑模式
+          alert('工作流导入成功！');
+        } catch (error) {
+          console.error('导入工作流失败:', error);
+          alert('导入工作流失败，请检查文件格式。');
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleExportSingleWorkflow = () => {
+    const workflowData = {
+      name: workflowName,
+      description: workflowDescription,
+      nodes: nodes,
+      edges: edges,
+      is_active: false // 导出时设置为非激活状态
+    };
+    const blob = new Blob([JSON.stringify(workflowData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${workflowName}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* 工具栏 */}
@@ -727,6 +768,29 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
                 >
                   + 添加节点
                 </button>
+                <input
+                  type="file"
+                  accept=".json"
+                  style={{ display: 'none' }}
+                  id="import-single-workflow-file"
+                  onChange={handleImportSingleFileChange}
+                />
+                {workflow?.id && (
+                  <button
+                    onClick={() => document.getElementById('import-single-workflow-file')?.click()}
+                    className="toolbar-button"
+                  >
+                    📥 导入当前工作流
+                  </button>
+                )}
+                {workflow?.id && (
+                  <button
+                    onClick={handleExportSingleWorkflow}
+                    className="toolbar-button"
+                  >
+                    📤 导出当前工作流
+                  </button>
+                )}
                 {!isAuthenticated && (
                   <span style={{ 
                     color: '#f56565', 
@@ -1057,7 +1121,8 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
           nodeTypes={useMemo(() => ({
             MessageTrigger: TriggerNode,
             TimeTrigger: TimeTriggerNode,
-            StatusTrigger: StatusTriggerNode,
+            DbTrigger: DbTriggerNode,
+            StatusTrigger: DbTriggerNode, // 向后兼容：旧的StatusTrigger映射到新的DbTriggerNode
             AI: AINode,
             Handoff: HandoffNode,
             Condition: ConditionNode,

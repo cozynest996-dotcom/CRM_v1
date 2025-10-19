@@ -20,10 +20,10 @@ export const nodeConfigs = {
       target: []
     }
   },
-  StatusTrigger: {
-    label: '状态触发器',
-    icon: '🔄',
-    color: '#68d391',
+  DbTrigger: {
+    label: '数据库触发器',
+    icon: '🗄️',
+    color: '#8b5cf6',
     handles: {
       source: [{ id: 'out', position: Position.Right }],
       target: []

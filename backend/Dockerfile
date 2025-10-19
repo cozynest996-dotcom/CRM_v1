@@ -1,5 +1,13 @@
-FROM python:3.11-slim-buster
+FROM python:3.11-slim
 WORKDIR /app
+
+# 安装 FFmpeg 用于音频处理
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libavcodec-extra \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -version
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .

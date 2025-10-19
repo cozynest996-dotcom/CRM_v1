@@ -107,3 +107,41 @@ export function formatFullDateTime(timestamp: string) {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
   })
 }
+
+// 格式化客户列表时间显示（类似WhatsApp）
+export function formatCustomerListTime(timestamp: string | null) {
+  if (!timestamp) return ''
+  
+  const date = new Date(timestamp)
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(yesterday.getDate() - 1)
+  
+  // 今天：显示时间
+  if (date.toDateString() === today.toDateString()) {
+    return date.toLocaleTimeString('zh-TW', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    })
+  }
+  
+  // 昨天：显示"昨天"
+  if (date.toDateString() === yesterday.toDateString()) {
+    return '昨天'
+  }
+  
+  // 一周内：显示星期几
+  const daysDiff = Math.floor((today.getTime() - date.getTime()) / (24 * 60 * 60 * 1000))
+  if (daysDiff < 7) {
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    return weekdays[date.getDay()]
+  }
+  
+  // 超过一周：显示日期
+  return date.toLocaleDateString('zh-TW', { 
+    month: 'numeric', 
+    day: 'numeric',
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+  })
+}

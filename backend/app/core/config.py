@@ -18,8 +18,10 @@ class Settings(BaseSettings):
     # Telegram 配置
     # TELEGRAM_API_ID: int = 0  # 你的 Telegram API ID
     # TELEGRAM_API_HASH: str = "" # 你的 Telegram API Hash
-    TELEGRAM_GATEWAY_URL: str = "http://telegram_gateway:3003" # 用于 Telegram Bot API
+    TELEGRAM_GATEWAY_URL: str = "http://telegram_gateway:4000" # 用于 Telegram Bot API
+    TELEGRAM_GATEWAY_SECRET: str = "your-gateway-secret-change-me" # Telegram Gateway 认证密钥
     BACKEND_PORT: int = 8000 # 后端服务端口，用于 webhook 回调
+    GATEWAY_TIMEOUT: int = 10 # 新增：网关超时时间（秒）
     
     # JWT 配置
     jwt_secret_key: str = "your-super-secret-jwt-key-change-in-production"

@@ -17,3 +17,5 @@ google-api-python-client
 supabase
 python-jose
 httpx # Required for TelegramListenerManager to make async HTTP requests
+SpeechRecognition # 新增：用于语音转文本
+pydub # 新增：用于音频格式转换

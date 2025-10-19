@@ -7,7 +7,7 @@ load_dotenv()
 
 # 基础配置（可以通过环境变量覆盖）
 BACKEND_URL = os.getenv('BACKEND_URL', 'http://localhost:8000')
-BACKEND_WEBHOOK = os.getenv('BACKEND_WEBHOOK_URL', f'{BACKEND_URL}/api/telegram/webhook')
+BACKEND_WEBHOOK = os.getenv('BACKEND_WEBHOOK', f'{BACKEND_URL}/api/messages/inbox')
 BACKEND_INTERNAL_SESSIONS = os.getenv('BACKEND_INTERNAL_SESSIONS', f'{BACKEND_URL}/settings/internal/telegram/sessions')
 
 # Gateway secret（用于验证，建议修改）

@@ -14,6 +14,10 @@ from app.events import subscribers, publish_event
 from app.middleware.auth import get_current_user
 from app.core.config import settings
 from uuid import UUID
+from app.services.telegram import send_telegram_message # 导入 Telegram 发送服务
+import base64 # 新增
+import tempfile # 新增
+import os # 新增
 
 class UUIDEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -35,9 +39,13 @@ def get_db():
 async def receive_message(data: dict, db: Session = Depends(get_db)):
     print(f"⏱️ {datetime.now()} - 收到消息推送: {data}")
     
-    # 验证必要字段
-    if not data.get("content"): # content 现在是所有消息的必要字段
-        raise HTTPException(status_code=400, detail="Missing message content")
+    # 验证必要字段 - 对于语音消息，content 可能为空但有 media 数据
+    content = data.get("content")
+    media_base64 = data.get("media_base64")
+    media_type = data.get("media_type")
+    
+    if not content and not (media_base64 and media_type):
+        raise HTTPException(status_code=400, detail="Missing message content or media data")
         
     # 获取消息来源渠道，默认为 whatsapp
     channel = data.get("channel", "whatsapp")
@@ -45,10 +53,10 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     chat_id = data.get("chat_id") # Telegram 消息的 chat_id
     from_id = data.get("from_id") # Telegram 消息的发送者 user_id
 
-    content = data.get("content")
     name = data.get("name", "Unknown")
     chat_history = data.get("chat_history", [])  # 新增聊天历史字段
-    
+    transcription = None # 存储转录文本
+
     # 🔒 首先確定用戶ID
     owner_user_id = data.get("user_id")
     if owner_user_id is None:
@@ -137,10 +145,52 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
             direction="inbound",
             content=content,
             timestamp=now,
+            channel=channel, # 保存渠道信息
+            media_type=media_type, # 新增：保存媒体类型
+            transcription=transcription # 新增：保存转录文本 (初始为None)
         )
+
+        # 如果是语音消息，进行转录处理
+        if media_base64 and media_type and channel == "whatsapp":
+            print(f"🎤 检测到语音消息，user {owner_user_id} 正在处理...")
+            try:
+                # 解码 Base64 数据
+                audio_data = base64.b64decode(media_base64)
+                # 创建临时文件
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio_file:
+                    temp_audio_file.write(audio_data)
+                    temp_audio_path = temp_audio_file.name
+                print(f"💾 临时语音文件已保存到: {temp_audio_path}")
+
+                # 调用语音转文本服务
+                from app.services.speech_to_text import transcribe_audio
+                transcription = await transcribe_audio(temp_audio_path, media_type)
+                
+                if transcription:
+                    print(f"✅ 语音转录成功: {transcription}")
+                    db_msg.transcription = transcription
+                    db_msg.content = transcription  # 使用转录文本作为消息内容
+                    # 🔄 更新工作流触发数据中的消息内容
+                    trigger_data["message"] = transcription
+                    print(f"🔄 工作流触发数据已更新为转录文本: {transcription}")
+                else:
+                    print(f"❌ 语音转录失败，使用占位符")
+                    db_msg.transcription = None
+                    db_msg.content = "🎤 [语音消息转录失败]"
+                    trigger_data["message"] = "🎤 [语音消息转录失败]"
+
+                # 清理临时文件
+                os.remove(temp_audio_path)
+                print(f"🗑️ 临时语音文件已删除: {temp_audio_path}")
+
+            except Exception as e:
+                print(f"❌ 语音消息处理失败: {e}")
+                db_msg.content = "❌ [语音消息处理失败]"
+                trigger_data["message"] = "❌ [语音消息处理失败]"
+
         customer.unread_count = (customer.unread_count or 0) + 1
         # 更新客户最近消息预览/时间，方便前端立即显示
-        customer.last_message = content
+        customer.last_message = db_msg.content # 使用处理后的内容
         customer.last_timestamp = now
         db.add(db_msg)
         db.add(customer)
@@ -172,7 +222,9 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
                 "timestamp": db_msg.timestamp.isoformat(),
                 "direction": "inbound",
                 "ack": db_msg.ack,
-                "customer_id": customer.id
+                "customer_id": customer.id,
+                "media_type": db_msg.media_type, # 新增
+                "transcription": db_msg.transcription # 新增
             },
             "customer": customer_data
         }
@@ -240,7 +292,10 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
             direction=db_msg.direction,
             content=db_msg.content,
             timestamp=db_msg.timestamp,
-            ack=db_msg.ack
+            ack=db_msg.ack,
+            channel=db_msg.channel, # 修复：添加缺失的 channel 字段
+            media_type=db_msg.media_type, # 新增
+            transcription=db_msg.transcription # 新增
         )
     except Exception as e:
         db.rollback()
@@ -272,19 +327,30 @@ def send_message(
         content=msg.content,
         direction="outbound",
         timestamp=datetime.utcnow(),
+        channel=msg.channel # 保存渠道信息
     )
     db.add(db_msg)
     db.commit()
     db.refresh(db_msg)
 
-    send_whatsapp_message(db_msg, customer.phone)
+    # 根据渠道发送消息
+    if msg.channel == "whatsapp":
+        send_whatsapp_message(db_msg, customer.phone)
+    elif msg.channel == "telegram":
+        if not customer.telegram_chat_id:
+            raise HTTPException(status_code=400, detail="Customer does not have a Telegram chat ID")
+        send_telegram_message(db_msg, customer.telegram_chat_id)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported channel: {msg.channel}")
+
     return MessageOut(
         id=str(db_msg.id),
         customer_id=str(db_msg.customer_id),
         direction=db_msg.direction,
         content=db_msg.content,
         timestamp=db_msg.timestamp,
-        ack=db_msg.ack
+        ack=db_msg.ack,
+        channel=db_msg.channel # 返回渠道信息
     )
 
 
@@ -364,7 +430,8 @@ def get_chat_history(customer_id: str, db: Session = Depends(get_db), current_us
             direction=msg.direction,
             content=msg.content,
             timestamp=msg.timestamp,
-            ack=msg.ack
+            ack=msg.ack,
+            channel=msg.channel # 返回渠道信息
         ))
     return serialized_messages
 
@@ -392,7 +459,10 @@ def webhook_whatsapp_seen(data: dict, db: Session = Depends(get_db)):
     if not backend_id or not whatsapp_id:
         raise HTTPException(status_code=400, detail="backend_message_id and whatsapp_id required")
 
-    msg = db.query(models.Message).filter(models.Message.id == backend_id).first()
+    msg = db.query(models.Message).filter(
+        models.Message.id == backend_id,
+        models.Message.channel == "whatsapp" # 明确渠道
+    ).first()
     if not msg:
         # 尝试按 whatsapp_id 查找或创建映射
         raise HTTPException(status_code=404, detail="Message not found")
@@ -452,7 +522,7 @@ def sse_events():
 
 @router.post("/ack")
 async def update_message_ack(data: dict, db: Session = Depends(get_db)):
-    """接收 WhatsApp 消息狀態更新 (已發送/已送達/已讀)"""
+    """接收 WhatsApp 消息状态更新 (已发送/已送达/已读)"""
     print(f"📱 {datetime.now()} - 收到消息狀態更新: {data}")
     
     message_id = data.get("message_id")
@@ -462,18 +532,20 @@ async def update_message_ack(data: dict, db: Session = Depends(get_db)):
     if not message_id:
         raise HTTPException(status_code=400, detail="Missing message_id")
     
-    # 🔒 查找屬於指定用戶的消息
+    # 🔒 查找属于指定用户的消息
     msg = db.query(models.Message).filter(
         models.Message.whatsapp_id == str(message_id),
-        models.Message.user_id == user_id
+        models.Message.user_id == user_id,
+        models.Message.channel == "whatsapp" # 明确渠道
     ).first()
     
     if not msg:
-        # 嘗試部分匹配（某些情況下 message_id 可能不完全匹配）
+        # 尝试部分匹配（某些情况下 message_id 可能不完全匹配）
         try:
             msg = db.query(models.Message).filter(
                 models.Message.whatsapp_id.contains(str(message_id)),
-                models.Message.user_id == user_id
+                models.Message.user_id == user_id,
+                models.Message.channel == "whatsapp" # 明确渠道
             ).first()
         except Exception:
             msg = None

@@ -1,23 +1,6 @@
 version: '3.8'
 
 services:
-  db:
-    image: postgres:14-alpine
-    restart: always
-    environment:
-      POSTGRES_DB: crm_db
-      POSTGRES_USER: crm_user
-      POSTGRES_PASSWORD: crm_password
-    ports:
-      - "5432:5432"
-    volumes:
-      - crm_data_volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crm_user -d crm_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   backend:
     build:
       context: ./backend
@@ -30,11 +13,10 @@ services:
       - "8000:8000"
     environment:
       WHATSAPP_GATEWAY_URL: http://whatsapp_gateway:3002
+      TELEGRAM_GATEWAY_URL: http://telegram_gateway:4000
     volumes:
       - ./backend:/app # Binding mount for local code changes
-    depends_on:
-      db:
-        condition: service_healthy
+    # removed db dependency
     entrypoint: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]
 
   frontend:
@@ -68,5 +50,29 @@ services:
       backend:
         condition: service_started
 
-volumes:
-  crm_data_volume:
+  telegram_gateway:
+    build:
+      context: ./telegram_gateway
+      dockerfile: Dockerfile
+    mem_limit: 512m # Set memory limit to 512MB
+    restart: always
+    env_file:
+      - ./.env
+    ports:
+      - "3003:4000" # 映射到宿主机的 3003 端口，容器内部是 4000 端口
+    environment:
+      BACKEND_WEBHOOK: http://backend:8000/api/messages/inbox # 网关接收到消息后回调后端服务的地址
+      BACKEND_INTERNAL_SESSIONS: http://backend:8000/settings/internal/telegram/sessions # 从后端获取会话信息的地址
+      GATEWAY_SECRET: your-gateway-secret-change-me # 网关认证密钥
+      # GATEWAY_SECRET: your_telegram_gateway_secret # 根据需要设置密钥
+      # API_ID 和 API_HASH 可以在后端设置，或通过环境变量传递
+      # API_ID: your_telegram_api_id
+      # API_HASH: your_telegram_api_hash
+      # SESSION_NAME: your_telegram_session_name # 可选，用于单客户端模式
+    volumes:
+      - ./telegram_gateway:/app
+      - ./telegram_gateway/sessions:/app/sessions # 持久化会话数据
+    # telegram_gateway doesn't need to depend on backend at startup
+
+# volumes:
+  # crm_data_volume: # Removed as local postgres is no longer used

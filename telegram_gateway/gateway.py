@@ -125,12 +125,13 @@ async def send_message_handler(request):
         bot_token = data.get('bot_token')
         user_id = data.get('user_id') # 获取 user_id
 
-        if not chat_id or not message or not bot_token:
-            return web.json_response({'status': 'error', 'message': 'Missing chat_id, text, or bot_token'}, status=400)
+        if not chat_id or not message:
+            return web.json_response({'status': 'error', 'message': 'Missing chat_id or text'}, status=400)
 
-        # 根据 bot_token 获取或创建 Bot 客户端
-        # 这里需要 API_ID 和 API_HASH，假设它们从 config 中获取
-        client = await get_bot_client(bot_token, API_ID, API_HASH)
+        # 根据 bot_token 获取或创建 Bot 客户端（仅在提供 bot_token 时）
+        client = None
+        if bot_token:
+            client = await get_bot_client(bot_token, API_ID, API_HASH)
         
         # 根据 user_id 找到对应的 Telethon 客户端发送消息
         # 目前 clients 存储的是用户会话，bot_clients 存储的是 bot 会话
@@ -145,7 +146,20 @@ async def send_message_handler(request):
 
         if session_client:
             logger.info(f"Sending message via user session '{session_name}' to {chat_id}")
-            await session_client.send_message(chat_id, message)
+            try:
+                # 尝试解析实体，如果是数字ID，先转换为整数
+                if chat_id.isdigit():
+                    chat_id = int(chat_id)
+                await session_client.send_message(chat_id, message)
+            except Exception as entity_error:
+                logger.warning(f"Failed to send to {chat_id} directly, trying to resolve entity: {entity_error}")
+                try:
+                    # 尝试通过用户名或电话号码解析
+                    entity = await session_client.get_entity(chat_id)
+                    await session_client.send_message(entity, message)
+                except Exception as resolve_error:
+                    logger.error(f"Failed to resolve entity {chat_id}: {resolve_error}")
+                    raise resolve_error
         elif client: # 使用 bot 客户端发送
             logger.info(f"Sending message via bot client to {chat_id}")
             await client.send_message(chat_id, message)

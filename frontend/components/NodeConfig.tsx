@@ -30,6 +30,9 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const [showPromptPreview, setShowPromptPreview] = useState(false) // 新增：显示 prompt 预览
   const [showPromptEditor, setShowPromptEditor] = useState(false) // 新增：显示 prompt 编辑器
   const [localData, setLocalData] = useState<any>(node.data || {})
+  const [editingVariableName, setEditingVariableName] = useState<{originalName: string, tempName: string} | null>(null) // 新增：用于跟踪正在编辑的变量名
+  const [showImagePreviewModal, setShowImagePreviewModal] = useState(false) // 图片预览弹窗
+  const [previewImageUrl, setPreviewImageUrl] = useState<string>('') // 预览图片URL
   const [compiledPromptText, setCompiledPromptText] = useState<string>('')
   const [showHeadersPanel, setShowHeadersPanel] = useState(false)
   const [availableHeaders, setAvailableHeaders] = useState<string[] | null>(null)
@@ -50,6 +53,9 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const [showKnowledgeBaseSelector, setShowKnowledgeBaseSelector] = useState<{show: boolean, position?: string, anchor?: DOMRect }>({ show: false })
   const [knowledgeBases, setKnowledgeBases] = useState<any[]>([]) // 新增：知识库列表
   const [showAdvancedApiConfig, setShowAdvancedApiConfig] = React.useState(false) // CustomAPI 的高级配置开关
+  // DbTrigger 相关状态
+  const [dbTriggerFields, setDbTriggerFields] = useState<Array<{key: string, label: string, type: string}>>([])
+  const [loadingDbFields, setLoadingDbFields] = useState(false)
   const [expandedSections, setExpandedSections] = useState({
     basic: true,
     dataUpdate: false,
@@ -188,6 +194,67 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     }
   }
 
+  // 获取 customers 表的字段信息
+  async function fetchDbTriggerFields() {
+    if (dbTriggerFields.length > 0) return
+    setLoadingDbFields(true)
+    try {
+      // 尝试获取详细的字段信息
+      const response = await api.get('/api/customers/fields/detailed')
+      console.log('Fetched customer fields:', response)
+      
+      const fields = []
+      
+      // 处理基础字段
+      if (response && response.basic_fields && Array.isArray(response.basic_fields)) {
+        response.basic_fields.forEach(field => {
+          fields.push({
+            key: field.name,
+            label: field.label,
+            type: field.type || 'string'
+          })
+        })
+      }
+      
+      // 处理自定义字段
+      if (response && response.custom_fields && Array.isArray(response.custom_fields)) {
+        response.custom_fields.forEach(field => {
+          fields.push({
+            key: `custom_fields.${field.name}`,
+            label: `${field.label} (自定义)`,
+            type: 'custom'
+          })
+        })
+      }
+      
+      if (fields.length > 0) {
+        setDbTriggerFields(fields)
+      } else {
+        // 回退到基本字段
+        const basicFields = [
+          { key: 'name', label: '姓名', type: 'string' },
+          { key: 'phone', label: '手机号', type: 'string' },
+          { key: 'email', label: '邮箱', type: 'string' },
+          { key: 'status', label: '状态', type: 'string' },
+          { key: 'stage_id', label: '阶段ID', type: 'number' }
+        ]
+        setDbTriggerFields(basicFields)
+      }
+    } catch (error) {
+      console.error('Failed to fetch customer fields:', error)
+      // 使用默认字段
+      const defaultFields = [
+        { key: 'name', label: '姓名', type: 'string' },
+        { key: 'phone', label: '手机号', type: 'string' },
+        { key: 'email', label: '邮箱', type: 'string' },
+        { key: 'status', label: '状态', type: 'string' }
+      ]
+      setDbTriggerFields(defaultFields)
+    } finally {
+      setLoadingDbFields(false)
+    }
+  }
+
   async function fetchMediaData() {
     if (loadingMedia) return
     setLoadingMedia(true)
@@ -294,6 +361,15 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   useEffect(() => {
     if (node.type === 'UpdateDB') {
       fetchCustomerFields(); // 获取完整的客户字段信息
+      fetchCustomerStages(); // 获取客户阶段用于 stage_id 下拉选择
+    }
+  }, [node.type]);
+
+  // 新增：当节点类型为 DbTrigger 时，加载客户字段信息
+  useEffect(() => {
+    if (node.type === 'DbTrigger' || node.type === 'StatusTrigger') {
+      fetchDbTriggerFields(); // 获取 customers 表的字段信息
+      fetchCustomerStages(); // 预加载客户阶段用于 stage_id 下拉
     }
   }, [node.type]);
 
@@ -397,6 +473,63 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     }, 10);
   };
 
+  const handleMediaSelect = (mediaUuid: string, mediaName: string) => {
+    const position = showMediaSelector.position;
+    
+    if (position === 'template_media') {
+      // 模板媒体选择 - 支持多选
+      const currentMediaList = localData.media_list || [];
+      const newMedia = { uuid: mediaUuid, name: mediaName };
+      
+      // 检查是否已经选择了这个媒体
+      const isAlreadySelected = currentMediaList.some(media => media.uuid === mediaUuid);
+      
+      let updatedMediaList;
+      if (isAlreadySelected) {
+        // 如果已选择，则取消选择
+        updatedMediaList = currentMediaList.filter(media => media.uuid !== mediaUuid);
+      } else {
+        // 如果未选择，则添加到列表
+        updatedMediaList = [...currentMediaList, newMedia];
+      }
+      
+      updateNodeData({ 
+        media_list: updatedMediaList,
+        media_send_mode: localData.media_send_mode || 'together_with_caption' // 保持或设置默认发送模式
+      });
+    } else if (position === 'system_prompt') {
+      // System prompt 媒体选择
+      const tag = `[[MEDIA:${mediaUuid}]]`;
+      if (selectedPromptId) {
+        setPromptLibrary(promptLibrary.map((p: any) => 
+          p.id === selectedPromptId 
+            ? { ...p, system_prompt: (p.system_prompt || '') + tag }
+            : p
+        ));
+      } else {
+        const currentPrompt = localData.system_prompt || '';
+        const updatedPrompt = currentPrompt + tag;
+        updateNodeData({ system_prompt: updatedPrompt });
+      }
+    } else if (position === 'user_prompt') {
+      // User prompt 媒体选择
+      const tag = `[[MEDIA:${mediaUuid}]]`;
+      if (selectedPromptId) {
+        setPromptLibrary(promptLibrary.map((p: any) => 
+          p.id === selectedPromptId 
+            ? { ...p, user_prompt: (p.user_prompt || '') + tag }
+            : p
+        ));
+      } else {
+        const currentPrompt = localData.user_prompt || '';
+        const updatedPrompt = currentPrompt + tag;
+        updateNodeData({ user_prompt: updatedPrompt });
+      }
+    }
+    
+    setShowMediaSelector({ show: false });
+  };
+
   const handleVariableSelect = (variableValue: string) => {
     let finalVariableValue = variableValue;
     // 如果变量是自定义实体记录字段，则替换 recordId 占位符
@@ -418,6 +551,23 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     // 使用光标位置插入变量
     if (position === 'url' || position === 'body') {
       insertTextAtCursor(position, finalVariableValue);
+    } else if (position === 'smart_body') {
+      // 智能变量选择器专门处理
+      insertTextAtCursor('body', finalVariableValue);
+    } else if (position === 'template') {
+      insertTextAtCursor('template', finalVariableValue);
+    } else if (position?.startsWith('template_')) {
+      // 处理多个模板消息的变量注入
+      const templateIndex = parseInt(position.replace('template_', ''));
+      const currentMessages = localData.message_templates || [];
+      if (currentMessages[templateIndex]) {
+        const updatedMessages = currentMessages.map((msg, i) => 
+          i === templateIndex 
+            ? { ...msg, content: (msg.content || '') + finalVariableValue }
+            : msg
+        );
+        updateNodeData({ message_templates: updatedMessages });
+      }
     } else if (position === 'fallback') {
       insertTextAtCursor('fallback_template', finalVariableValue);
     } else if (position === 'system_prompt') {
@@ -445,6 +595,14 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     } else if (position?.startsWith('static_')) {
       const updateId = position.replace('static_', '');
       insertTextAtCursor(`static_${updateId}`, finalVariableValue);
+    } else if (position?.startsWith('smart_var_')) {
+      // 处理智能变量的数据源选择
+      const varName = position.replace('smart_var_', '');
+      const smartVariables = localData.smart_variables || {};
+      if (smartVariables[varName]) {
+        smartVariables[varName] = { ...smartVariables[varName], source: finalVariableValue };
+        updateNodeData({ smart_variables: smartVariables });
+      }
     } else {
       const variables = localData.variables || {};
       if (position) {
@@ -480,6 +638,195 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         </select>
         <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
           选择从哪个平台接收客户消息来触发工作流
+        </div>
+      </div>
+    </>
+  )
+
+  const renderDbTriggerConfig = () => (
+    <>
+      <div className="config-field">
+        <label>数据表</label>
+        <select 
+          value={localData.config?.table || 'customers'} 
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                table: e.target.value,
+              }
+            });
+          }}
+        >
+          <option value="customers">🗄️ customers (客户表)</option>
+        </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          选择要监听的数据表
+        </div>
+      </div>
+
+      <div className="config-field">
+        <label>监听字段</label>
+        <select 
+          value={localData.config?.field || ''} 
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                field: e.target.value,
+              }
+            });
+          }}
+          disabled={loadingDbFields}
+        >
+          <option value="">{loadingDbFields ? '加载字段中...' : '请选择字段...'}</option>
+          {dbTriggerFields.map(field => (
+            <option key={field.key} value={field.key}>
+              📊 {field.label} ({field.key}) - {field.type}
+            </option>
+          ))}
+        </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          选择要监听变化的字段，支持所有 customers 表字段
+        </div>
+      </div>
+
+      <div className="config-field">
+        <label>触发条件</label>
+        <select 
+          value={localData.config?.condition || 'equals'} 
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                condition: e.target.value,
+              }
+            });
+          }}
+        >
+          <option value="equals">🎯 等于 (=)</option>
+          <option value="not_equals">❌ 不等于 (≠)</option>
+          <option value="contains">🔍 包含</option>
+          <option value="not_contains">🚫 不包含</option>
+          <option value="starts_with">▶️ 开头是</option>
+          <option value="ends_with">⏹️ 结尾是</option>
+          <option value="is_empty">⚪ 为空</option>
+          <option value="is_not_empty">⚫ 不为空</option>
+          <option value="changed">🔄 发生变化</option>
+        </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          设置字段值的匹配条件
+        </div>
+      </div>
+
+      {localData.config?.condition && !['is_empty', 'is_not_empty', 'changed'].includes(localData.config.condition) && (
+        <div className="config-field">
+          <label>匹配值</label>
+          {localData.config?.field === 'stage_id' ? (
+            <select
+              value={localData.config?.value || ''}
+              onChange={(e) => {
+                updateNodeData({
+                  config: {
+                    ...localData.config,
+                    value: e.target.value,
+                  }
+                });
+              }}
+            >
+              <option value="">选择阶段...</option>
+              {customerStages.map((stage: any) => (
+                <option key={stage.id} value={stage.id}>
+                  {stage.name} {stage.description ? `(${stage.description})` : ''}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={localData.config?.value || ''}
+              onChange={(e) => {
+                updateNodeData({
+                  config: {
+                    ...localData.config,
+                    value: e.target.value,
+                  }
+                });
+              }}
+              placeholder="输入要匹配的值"
+            />
+          )}
+          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+            {localData.config?.field === 'stage_id' 
+              ? '选择要匹配的客户阶段' 
+              : '输入字段值需要匹配的内容'
+            }
+          </div>
+        </div>
+      )}
+
+      <div className="config-field">
+        <label>触发平台</label>
+        <select 
+          value={localData.config?.trigger_platform || 'whatsapp'} 
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                trigger_platform: e.target.value,
+              }
+            });
+          }}
+        >
+          <option value="whatsapp">📱 WhatsApp (使用 phone 字段)</option>
+          <option value="telegram">💬 Telegram (使用 telegram_chat_id 字段)</option>
+          <option value="auto">🤖 自动检测 (优先 WhatsApp，回退到 Telegram)</option>
+        </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          选择触发后续节点时使用的通信平台
+        </div>
+      </div>
+
+      <div className="config-field">
+        <label>触发频率</label>
+        <select 
+          value={localData.config?.frequency || 'immediate'} 
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                frequency: e.target.value,
+              }
+            });
+          }}
+        >
+          <option value="immediate">⚡ 立即触发</option>
+          <option value="debounce_1s">⏱️ 防抖 1秒</option>
+          <option value="debounce_5s">⏱️ 防抖 5秒</option>
+          <option value="debounce_30s">⏱️ 防抖 30秒</option>
+        </select>
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          设置触发的频率控制，防抖可避免频繁触发
+        </div>
+      </div>
+
+      <div className="config-field">
+        <label>描述</label>
+        <input
+          type="text"
+          value={localData.config?.description || ''}
+          onChange={(e) => {
+            updateNodeData({
+              config: {
+                ...localData.config,
+                description: e.target.value,
+              }
+            });
+          }}
+          placeholder="触发器描述（可选）"
+        />
+        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+          为这个触发器添加描述说明
         </div>
       </div>
     </>
@@ -1587,6 +1934,15 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     // 硬性更新字段管理
     const staticUpdates = localData.static_updates || []
 
+    // 辅助函数：判断是否为 stage_id 字段
+    const isStageIdField = (fieldName: string) => {
+      if (!fieldName) return false;
+      return fieldName === 'stage_id' || 
+             fieldName === 'customer.stage_id' || 
+             fieldName === 'db.customer.stage_id' || 
+             fieldName.includes('stage_id');
+    }
+
     const addStaticUpdate = () => {
       const newUpdates = [...staticUpdates, {
         id: uuidv4(),
@@ -1748,7 +2104,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                         <select
                           value={update.db_field}
                           onChange={(e) => {
-                            const selectedField = e.target.value;
+                            let selectedField = e.target.value;
                             // 从 availableVariables 中查找对应的字段信息
                             let fieldLabel = selectedField;
                             
@@ -1761,6 +2117,19 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                               const customField = availableVariables['客户自定义字段']?.find((f: any) => f.value === `{{${selectedField}}}`);
                               if (customField) {
                                 fieldLabel = customField.label;
+                              }
+                              // 如果选择的是完整的变量格式，需要提取字段名
+                              if (selectedField.startsWith('{{') && selectedField.endsWith('}}')) {
+                                // 从 {{db.customer.field}} 或 {{custom_fields.field}} 中提取字段名
+                                if (selectedField.includes('db.customer.')) {
+                                  const extractedField = selectedField.replace('{{db.customer.', '').replace('}}', '');
+                                  fieldLabel = availableVariables['客户基础信息']?.find((f: any) => f.value === selectedField)?.label || extractedField;
+                                  selectedField = extractedField; // 更新为纯字段名
+                                } else if (selectedField.includes('custom_fields.')) {
+                                  const extractedField = selectedField.replace('{{custom_fields.', '').replace('}}', '');
+                                  fieldLabel = availableVariables['客户自定义字段']?.find((f: any) => f.value === selectedField)?.label || extractedField;
+                                  selectedField = `custom_fields.${extractedField}`; // 保持自定义字段格式
+                                }
                               }
                             }
                             
@@ -1811,36 +2180,75 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                           💡 更新值
                         </label>
                         <div style={{ position: 'relative' }}>
-                          <textarea
-                            value={update.value}
-                            onChange={(e) => updateStaticUpdate(update.id, { value: e.target.value })}
-                            placeholder="输入固定值或使用变量，支持多行文本"
-                            rows={2}
-                            style={{ 
-                              width: '100%', 
-                              paddingRight: '40px',
-                              resize: 'vertical',
-                              minHeight: '60px'
-                            }}
-                          />
-                          <button
-                            onClick={(e) => openVariableSelector(e, `static_${update.id}`)}
-                            style={{
-                              position: 'absolute',
-                              right: '8px',
-                              top: '8px',
-                              background: '#3b82f6',
-                              color: 'white',
-                              border: 'none',
-                              borderRadius: '4px',
-                              padding: '4px 8px',
-                              fontSize: '12px',
-                              cursor: 'pointer'
-                            }}
-                          >
-                            @变量
-                          </button>
+                          {/* 调试信息 */}
+                          {process.env.NODE_ENV === 'development' && (
+                            <div style={{ fontSize: '10px', color: '#999', marginBottom: '4px' }}>
+                              Debug: db_field = "{update.db_field}", customerStages.length = {customerStages.length}
+                            </div>
+                          )}
+                          {isStageIdField(update.db_field) ? (
+                            <select
+                              value={update.value}
+                              onChange={(e) => updateStaticUpdate(update.id, { value: e.target.value })}
+                              style={{ 
+                                width: '100%',
+                                maxWidth: '100%',
+                                padding: '8px',
+                                border: '1px solid #d1d5db',
+                                borderRadius: '4px',
+                                fontSize: '14px'
+                              }}
+                            >
+                              <option value="">选择阶段...</option>
+                              {customerStages.map((stage: any) => (
+                                <option key={stage.id} value={stage.id}>
+                                  {stage.name} {stage.description ? `(${stage.description})` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <textarea
+                              value={update.value}
+                              onChange={(e) => updateStaticUpdate(update.id, { value: e.target.value })}
+                              placeholder="输入固定值或使用变量，支持多行文本"
+                              rows={2}
+                              style={{ 
+                                width: '100%',
+                                maxWidth: '100%',
+                                paddingRight: '40px',
+                                resize: 'vertical',
+                                minHeight: '60px',
+                                boxSizing: 'border-box'
+                              }}
+                            />
+                          )}
+                          {!isStageIdField(update.db_field) && (
+                            <button
+                              onClick={(e) => openVariableSelector(e, `static_${update.id}`)}
+                              style={{
+                                position: 'absolute',
+                                right: '8px',
+                                top: '8px',
+                                background: '#3b82f6',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '4px',
+                                padding: '4px 8px',
+                                fontSize: '12px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              @变量
+                            </button>
+                          )}
                         </div>
+                        {isStageIdField(update.db_field) && update.value && (
+                          <div style={{ fontSize: '11px', color: '#666', marginTop: '4px' }}>
+                            选中阶段: <strong>
+                              {customerStages.find((stage: any) => stage.id.toString() === update.value.toString())?.name || '未知阶段'}
+                            </strong>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -2359,80 +2767,301 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   )
 
   const renderTemplateConfig = () => (
-    <>
-      <div className="config-field">
-        <label>模板类型</label>
-        <select
-          value={localData.template_type || 'text'}
-          onChange={(e) => updateNodeData({ template_type: e.target.value })}
-        >
-          <option value="text">普通文本</option>
-          <option value="whatsapp">WhatsApp模板</option>
-        </select>
+    <div style={{
+      background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+      borderRadius: '16px',
+      padding: '24px',
+      border: '1px solid rgba(148, 163, 184, 0.2)',
+      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)'
+    }}>
+      {/* 标题区域 */}
+      <div style={{
+        marginBottom: '24px',
+        paddingBottom: '16px',
+        borderBottom: '2px solid rgba(102, 126, 234, 0.1)'
+      }}>
+        <h3 style={{
+          margin: 0,
+          fontSize: '20px',
+          fontWeight: '600',
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          backgroundClip: 'text'
+        }}>
+          📝 模板消息配置
+        </h3>
+        <p style={{
+          margin: '8px 0 0 0',
+          fontSize: '14px',
+          color: '#64748b',
+          fontWeight: '500'
+        }}>
+          配置消息模板类型和媒体内容
+        </p>
       </div>
 
-      {localData.template_type === 'whatsapp' && (
-        <>
-          <div className="config-field">
-            <label>模板名称</label>
-            <input
-              type="text"
-              value={localData.template_name || ''}
-              onChange={(e) => updateNodeData({ template_name: e.target.value })}
-              placeholder="例如: greeting_message"
-            />
-          </div>
-          <div className="config-field">
-            <label>模板语言</label>
-            <select
-              value={localData.template_language || 'zh_CN'}
-              onChange={(e) => updateNodeData({ template_language: e.target.value })}
+
+      {/* 媒体选择配置 */}
+      <div style={{ marginBottom: '24px' }}>
+        <label style={{
+          display: 'block',
+          marginBottom: '12px',
+          fontSize: '14px',
+          fontWeight: '600',
+          color: '#374151'
+        }}>
+          📎 媒体内容
+        </label>
+        
+        <div style={{ 
+          background: 'white',
+          borderRadius: '12px',
+          padding: '16px',
+          border: '1px solid rgba(148, 163, 184, 0.15)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                  <button
+              onClick={(e) => {
+                openMediaSelector(e, 'template_media');
+                fetchMediaData(); // 确保加载媒体数据
+              }}
+              style={{
+                padding: '12px 20px',
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '10px',
+                fontSize: '14px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                transition: 'all 0.2s ease',
+                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-2px)';
+                e.currentTarget.style.boxShadow = '0 8px 24px rgba(16, 185, 129, 0.4)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(16, 185, 129, 0.3)';
+              }}
             >
-              <option value="zh_CN">中文</option>
-              <option value="en_US">英文</option>
-              <option value="ms_MY">马来文</option>
-            </select>
+              📎 选择媒体
+                  </button>
+            
+            {localData.media_list && localData.media_list.length > 0 && (
+                  <button
+                onClick={() => updateNodeData({ media_list: [], media_send_mode: null })}
+                style={{
+                  padding: '8px 16px',
+                  background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                }}
+              >
+                🗑️ 清除全部
+                  </button>
+            )}
           </div>
-          <div className="config-field">
-            <label>模板变量</label>
-            <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>
-              点击 "+" 添加变量，或者手动输入
+          
+          {localData.media_list && localData.media_list.length > 0 && (
+            <div style={{ marginBottom: '16px' }}>
+              <div style={{
+                padding: '12px 16px',
+                background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)',
+                border: '2px solid #0ea5e9',
+                borderRadius: '10px',
+                fontSize: '13px',
+                color: '#0369a1',
+                fontWeight: '500',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                marginBottom: '12px'
+              }}>
+                <span style={{ fontSize: '16px' }}>✅</span>
+                <span>已选择 {localData.media_list.length} 个媒体文件</span>
             </div>
             
-            {/* 变量列表 */}
-            <div style={{ marginBottom: '8px' }}>
-              {Object.entries(localData.variables || {}).map(([key, value], index) => (
-                <div key={index} className="variable-item">
-                  <span className="variable-number">
-                    {key}
-                  </span>
-                  <input
-                    type="text"
-                    value={String(value || '')}
-                    onChange={(e) => {
-                      const newVariables = { ...localData.variables };
-                      newVariables[key] = e.target.value;
-                      updateNodeData({ variables: newVariables });
-                    }}
-                    className="variable-input"
-                    placeholder="选择变量或输入文本"
-                  />
+              {/* 媒体预览网格 */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+                gap: '12px',
+                marginBottom: '16px',
+                padding: '12px',
+                background: 'rgba(248, 250, 252, 0.8)',
+                borderRadius: '8px',
+                border: '1px solid rgba(148, 163, 184, 0.2)'
+              }}>
+                {localData.media_list.map((media, index) => (
+                  <div key={media.uuid} style={{
+                    position: 'relative',
+                    background: 'white',
+                    borderRadius: '8px',
+                    padding: '8px',
+                    border: '1px solid rgba(148, 163, 184, 0.2)',
+                    boxShadow: '0 2px 4px rgba(0, 0, 0, 0.05)'
+                  }}>
+                    {/* 媒体缩略图 */}
+                    <div style={{
+                      width: '100%',
+                      height: '80px',
+                      background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%)',
+                      borderRadius: '6px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginBottom: '8px',
+                      overflow: 'hidden',
+                      position: 'relative'
+                    }}>
+                      {/* 查找对应的媒体数据以获取file_url */}
+                      {(() => {
+                        const mediaData = mediaList.find(m => m.id === media.uuid);
+                        if (mediaData && mediaData.media_type === 'image' && mediaData.file_url) {
+                          return (
+                            <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+                              <img 
+                                src={mediaData.file_url}
+                                alt={media.name}
+                                style={{
+                                  width: '100%',
+                                  height: '100%',
+                                  objectFit: 'cover',
+                                  borderRadius: '4px'
+                                }}
+                                onError={(e) => {
+                                  e.currentTarget.style.display = 'none';
+                                  const nextElement = e.currentTarget.nextElementSibling as HTMLElement;
+                                  if (nextElement) {
+                                    nextElement.style.display = 'flex';
+                                  }
+                                }}
+                              />
+                              {/* 预览按钮 */}
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  top: '4px',
+                                  right: '24px',
+                                  background: 'rgba(0, 0, 0, 0.6)',
+                                  borderRadius: '50%',
+                                  padding: '4px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  cursor: 'pointer',
+                                  zIndex: 5,
+                                  width: '20px',
+                                  height: '20px'
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPreviewImageUrl(mediaData.file_url);
+                                  setShowImagePreviewModal(true);
+                                }}
+                                title="预览图片"
+                              >
+                                👁️
+                              </div>
+                              {/* 备用图标（如果图片加载失败） */}
+                              <div style={{
+                                display: 'none',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '24px',
+                                color: '#64748b',
+                                width: '100%',
+                                height: '100%'
+                              }}>
+                                🖼️
+                              </div>
+                            </div>
+                          );
+                        } else {
+                          // 非图片文件或没有找到媒体数据
+                          const isVideo = media.name.match(/\.(mp4|avi|mov|wmv|flv|webm)$/i);
+                          const isImage = media.name.match(/\.(jpg|jpeg|png|gif|webp)$/i);
+                          return (
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '24px',
+                              color: '#64748b'
+                            }}>
+                              {isVideo ? '🎥' : isImage ? '🖼️' : '📄'}
+                            </div>
+                          );
+                        }
+                      })()}
+                    </div>
+                    
+                    {/* 文件名 */}
+                    <div style={{
+                      fontSize: '11px',
+                      color: '#475569',
+                      fontWeight: '500',
+                      textAlign: 'center',
+                      marginBottom: '8px',
+                      wordBreak: 'break-all',
+                      lineHeight: '1.3'
+                    }}>
+                      {media.name.length > 15 ? `${media.name.substring(0, 12)}...` : media.name}
+                    </div>
+                    
+                    {/* 删除按钮 */}
                   <button
                     onClick={() => {
-                      setShowVariableSelector({ show: true, position: key })
-                      fetchCustomerFields() // 获取最新的客户字段
-                    }}
-                    className="variable-button select"
-                  >
-                    @
-                  </button>
-                  <button
-                    onClick={() => {
-                      const newVariables = { ...localData.variables };
-                      delete newVariables[key];
-                      updateNodeData({ variables: newVariables });
-                    }}
-                    className="variable-button delete"
+                        const updatedMediaList = localData.media_list.filter((_, i) => i !== index);
+                        updateNodeData({ 
+                          media_list: updatedMediaList,
+                          media_send_mode: updatedMediaList.length === 0 ? null : localData.media_send_mode
+                        });
+                      }}
+                      style={{
+                        position: 'absolute',
+                        top: '4px',
+                        right: '4px',
+                        width: '20px',
+                        height: '20px',
+                        background: 'rgba(239, 68, 68, 0.9)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '50%',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        transition: 'all 0.2s ease',
+                        zIndex: 10
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(220, 38, 38, 1)';
+                        e.currentTarget.style.transform = 'scale(1.1)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(239, 68, 68, 0.9)';
+                        e.currentTarget.style.transform = 'scale(1)';
+                      }}
+                      title="删除此媒体"
                   >
                     ×
                   </button>
@@ -2440,54 +3069,337 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               ))}
             </div>
 
-            {/* 添加变量按钮 */}
-            <button
-              onClick={() => {
-                const variables = localData.variables || {};
-                const nextKey = String(Object.keys(variables).length + 1);
-                updateNodeData({ 
-                  variables: {
-                    ...variables,
-                    [nextKey]: ''
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                📱 媒体发送模式
+              </label>
+              
+              <select
+                value={localData.media_send_mode || 'together_with_caption'}
+                onChange={(e) => {
+                  const mode = e.target.value;
+                  let media_settings = {};
+                  
+                  switch(mode) {
+                    case 'together_with_caption':
+                      // 文本和媒体一起发送：只取第一张照片和第一条文本一起发送
+                      media_settings = {
+                        send_media_separately: false,
+                        send_with_caption: true,
+                        use_first_media_only: true,
+                        paired_sending: false,
+                        delay_between_media: false
+                      };
+                      break;
+                    case 'paired_sending':
+                      // 媒体文本配对发送：媒体1+文本1，媒体2+文本2...
+                      media_settings = {
+                        send_media_separately: false,
+                        send_with_caption: true,
+                        use_first_media_only: false,
+                        paired_sending: true,
+                        delay_between_media: false
+                      };
+                      break;
+                    case 'separate_no_delay':
+                      // 媒体和文本分开发送：先发送所有媒体，再发送文本
+                      media_settings = {
+                        send_media_separately: true,
+                        send_with_caption: false,
+                        use_first_media_only: false,
+                        paired_sending: false,
+                        delay_between_media: false
+                      };
+                      break;
                   }
+                  
+                  updateNodeData({ 
+                    media_send_mode: mode,
+                    media_settings: media_settings
                 });
               }}
-              className="add-variable-button"
-            >
-              + 添加变量
-            </button>
-          </div>
-        </>
-      )}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  background: 'white',
+                  outline: 'none',
+                  transition: 'all 0.2s ease'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = '#d1d5db';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <option value="together_with_caption">📎 文本和媒体一起发送（只取第一张照片）</option>
+                <option value="paired_sending">🔗 媒体文本配对发送（媒体1+文本1，媒体2+文本2...）</option>
+                <option value="separate_no_delay">📤 媒体和文本分开发送（先发所有媒体，再发文本）</option>
+              </select>
 
-      <div className="config-field">
-        <label>备用消息模板</label>
-        <div>
-          <textarea
-            value={localData.fallback_template || ''}
-            onChange={(e) => updateNodeData({ fallback_template: e.target.value })}
-            placeholder={`您好 {{trigger.name}}！感谢您的咨询。`}
-            rows={3}
-            style={{ width: '100%' }}
-          />
-
-          <div className="prompt-actions">
-            <button
-              className="small-action-button"
-                  onClick={() => {
-                    setShowVariableSelector({ show: true, position: 'fallback' })
-                    fetchCustomerFields() // 获取最新的客户字段
-                  }}
-            >
-              @变量
-            </button>
+              {localData.media_send_mode === 'separate_with_delay' && (
+                <div style={{ marginTop: '12px', paddingLeft: '16px' }}>
+                  <label style={{
+                    display: 'block',
+                    marginBottom: '6px',
+                    fontSize: '13px',
+                    fontWeight: '500',
+                    color: '#374151'
+                  }}>
+                    ⏱️ 延迟时间 (秒)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={localData.media_settings?.delay_seconds || 3}
+                    onChange={(e) => updateNodeData({
+                      media_settings: {
+                        ...localData.media_settings,
+                        delay_seconds: parseInt(e.target.value) || 3
+                      }
+                    })}
+                    style={{
+                      width: '120px',
+                      padding: '8px 12px',
+                      border: '1px solid #d1d5db',
+                      borderRadius: '6px',
+                      fontSize: '13px',
+                      outline: 'none',
+                      transition: 'all 0.2s ease'
+                    }}
+                    onFocus={(e) => {
+                      e.currentTarget.style.borderColor = '#667eea';
+                      e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                    }}
+                    onBlur={(e) => {
+                      e.currentTarget.style.borderColor = '#d1d5db';
+                      e.currentTarget.style.boxShadow = 'none';
+                    }}
+                  />
           </div>
-        </div>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          支持变量: {`{{trigger.name}}`}, {`{{trigger.phone}}`}, {`{{db.customer.name}}`}等，点击 "@变量" 选择
+              )}
+            </div>
+          )}
+          
+          <div style={{
+            fontSize: '12px',
+            color: '#64748b',
+            marginTop: (localData.media_list && localData.media_list.length > 0) ? '0' : '8px',
+            padding: '8px 12px',
+            background: 'rgba(102, 126, 234, 0.05)',
+            borderRadius: '8px',
+            borderLeft: '3px solid #667eea'
+          }}>
+            💡 <strong>发送模式说明：</strong>
+            <br />• <strong>一起发送（附带说明）：</strong>媒体和文本作为一条消息发送，媒体包含文本说明
+            <br />• <strong>一起发送（无说明）：</strong>媒体和文本作为一条消息发送，媒体不包含文本说明
+            <br />• <strong>分开发送：</strong>先发送媒体文件，再发送文本消息
+            <br />• <strong>分开发送（延迟）：</strong>先发送媒体，延迟后发送文本，模拟真实对话节奏
+          </div>
         </div>
       </div>
-    </>
+
+      {/* 多条消息模板 */}
+      <div style={{ marginBottom: '24px' }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '12px'
+        }}>
+          <label style={{
+            fontSize: '14px',
+            fontWeight: '600',
+            color: '#374151'
+          }}>
+            📝 消息模板内容
+          </label>
+          <button
+            onClick={() => {
+              const currentMessages = localData.message_templates || [{ id: Date.now(), content: '' }];
+              const newMessage = { id: Date.now(), content: '' };
+              updateNodeData({ message_templates: [...currentMessages, newMessage] });
+            }}
+            style={{
+              padding: '6px 12px',
+              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+              color: 'white',
+              border: 'none',
+              borderRadius: '8px',
+              fontSize: '12px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(16, 185, 129, 0.3)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
+          >
+            ➕ 添加消息
+            </button>
+          </div>
+
+        {/* 消息模板列表 */}
+        {(localData.message_templates || [{ id: Date.now(), content: localData.template || '' }]).map((message, index) => (
+          <div key={message.id} style={{
+            marginBottom: '16px',
+            padding: '16px',
+            background: 'white',
+            border: '2px solid rgba(102, 126, 234, 0.1)',
+            borderRadius: '12px',
+            position: 'relative'
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: '8px'
+            }}>
+              <span style={{
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                消息 #{index + 1}
+              </span>
+              {(localData.message_templates || []).length > 1 && (
+                <button
+                  onClick={() => {
+                    const updatedMessages = (localData.message_templates || []).filter((_, i) => i !== index);
+                    updateNodeData({ message_templates: updatedMessages });
+                  }}
+                  style={{
+                    width: '24px',
+                    height: '24px',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    color: '#dc2626',
+                    border: '1px solid rgba(239, 68, 68, 0.2)',
+                    borderRadius: '6px',
+                    fontSize: '14px',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    transition: 'all 0.2s ease'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)';
+                  }}
+                  title="删除此消息"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            
+            <div style={{ position: 'relative' }}>
+          <textarea
+                value={message.content || ''}
+                onChange={(e) => {
+                  const updatedMessages = (localData.message_templates || []).map((msg, i) => 
+                    i === index ? { ...msg, content: e.target.value } : msg
+                  );
+                  updateNodeData({ message_templates: updatedMessages });
+                }}
+                onKeyDown={(e) => handleInputKeyDown(e, `template_${index}`)}
+                onSelect={(e) => handleInputSelect(e, `template_${index}`)}
+                placeholder={index === 0 ? `您好 {{trigger.name}}！
+
+我们已经收到您的咨询，客服将在 {{db.customer.response_time || '5分钟'}} 内回复您。` : `这是第 ${index + 1} 条消息...
+
+可以添加更多内容或使用变量 {{trigger.name}}`}
+                rows={4}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  border: '1px solid rgba(148, 163, 184, 0.3)',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  fontFamily: 'monospace',
+                  lineHeight: '1.5',
+                  resize: 'vertical',
+                  outline: 'none',
+                  transition: 'all 0.2s ease',
+                  boxSizing: 'border-box',
+                  background: '#fafafa'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                  e.currentTarget.style.background = 'white';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = 'rgba(148, 163, 184, 0.3)';
+                  e.currentTarget.style.boxShadow = 'none';
+                  e.currentTarget.style.background = '#fafafa';
+                }}
+              />
+            <button
+                  onClick={() => {
+                  setShowVariableSelector({ show: true, position: `template_${index}` })
+                    fetchCustomerFields() // 获取最新的客户字段
+                  }}
+                style={{
+                  position: 'absolute',
+                  right: '8px',
+                  top: '8px',
+                  background: '#3b82f6',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '4px 8px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  fontWeight: '600',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = '#2563eb';
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = '#3b82f6';
+                  e.currentTarget.style.transform = 'translateY(0)';
+                }}
+              >
+                @ 变量
+            </button>
+          </div>
+        </div>
+        ))}
+
+        <div style={{
+          fontSize: '12px',
+          color: '#64748b',
+          marginTop: '8px',
+          padding: '8px 12px',
+          background: 'rgba(102, 126, 234, 0.05)',
+          borderRadius: '8px',
+          borderLeft: '3px solid #667eea'
+        }}>
+          💡 <strong>多消息说明：</strong>支持发送多条消息，按顺序依次发送。每条消息都支持变量: {`{{trigger.name}}`}, {`{{trigger.phone}}`}, {`{{db.customer.name}}`}等
+        </div>
+      </div>
+      </div>
   )
 
   const renderCustomAPIConfig = () => {
@@ -2523,39 +3435,12 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
 
       <div className="config-field">
         <label>API 地址</label>
-        <div style={{ position: 'relative' }}>
           <input
-            ref={(el) => { if (el) inputRefs.current['url'] = el; }}
             type="text"
             value={localData.url || ''}
             onChange={(e) => updateNodeData({ url: e.target.value })}
-            onKeyDown={(e) => handleInputKeyDown(e, 'url')}
-            onSelect={(e) => handleInputSelect(e, 'url')}
-            placeholder="https://api.example.com/endpoint (输入 @ 选择变量)"
-            style={{ paddingRight: '60px' }}
-          />
-          <button
-            onClick={(e) => openVariableSelector(e, 'url')}
-            style={{
-              position: 'absolute',
-              right: '8px',
-              top: '50%',
-              transform: 'translateY(-50%)',
-              background: '#3b82f6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              padding: '4px 8px',
-              fontSize: '12px',
-              cursor: 'pointer'
-            }}
-          >
-            @变量
-          </button>
-        </div>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          💡 支持变量：{`{{trigger.phone}}`}、{`{{db.customer.name}}`} 等 | 输入 @ 快速选择
-        </div>
+          placeholder="https://api.example.com/endpoint"
+        />
       </div>
 
       {/* 认证配置 */}
@@ -2645,9 +3530,316 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
 
       {/* 请求体配置（仅POST/PUT显示） */}
       {(localData.method === 'POST' || localData.method === 'PUT') && (
+        <>
+          {/* 智能变量配置面板 */}
         <div className="config-field">
-          <label>请求体 (JSON)</label>
-          <div style={{ position: 'relative' }}>
+            <label>🔧 智能变量配置</label>
+            <div style={{ fontSize: '12px', color: '#666', marginBottom: '16px', lineHeight: '1.5' }}>
+              <strong>💡 配置说明：</strong><br/>
+              • 创建有意义的变量名，在请求体中使用 <code style={{background: '#f0f0f0', padding: '2px 4px', borderRadius: '3px'}}>{'{{变量名}}'}</code><br/>
+              • 支持数据转换（取首词、后4位等）和实时预览<br/>
+              • 变量会自动在请求体编辑器中提供智能提示
+            </div>
+            
+            {/* 变量列表 */}
+            <div style={{ 
+              marginBottom: '16px',
+              maxHeight: '400px',
+              overflow: 'auto',
+              border: Object.keys(localData.smart_variables || {}).length > 2 ? '1px solid #e9ecef' : 'none',
+              borderRadius: '12px',
+              padding: Object.keys(localData.smart_variables || {}).length > 2 ? '12px' : '0'
+            }}>
+              {Object.entries(localData.smart_variables || {}).map(([varName, varConfig]: [string, any]) => (
+                <div key={varName} style={{
+                  border: '2px solid #e2e8f0',
+                  borderRadius: '12px',
+                  padding: '16px',
+                  marginBottom: '12px',
+                  background: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.05)'
+                }}>
+                  {/* 变量头部 */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ 
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#1e293b',
+                        fontFamily: 'monospace'
+                      }}>
+                        {varName}
+                      </span>
+                      <span style={{
+                        fontSize: '12px',
+                        color: '#64748b',
+                        background: '#f1f5f9',
+                        padding: '2px 8px',
+                        borderRadius: '12px'
+                      }}>
+                        {varConfig.displayName || '未命名变量'}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const newVariables = { ...localData.smart_variables };
+                        delete newVariables[varName];
+                        updateNodeData({ smart_variables: newVariables });
+                      }}
+                      style={{
+                        background: 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)',
+                        color: '#dc2626',
+                        border: 'none',
+                        borderRadius: '8px',
+                        padding: '6px 12px',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        fontWeight: '600'
+                      }}
+                    >
+                      🗑️ 删除
+                    </button>
+                  </div>
+
+                  {/* 变量配置 - 改为分行显示 */}
+                  <div style={{ marginBottom: '12px' }}>
+                    <div style={{ marginBottom: '12px' }}>
+                      <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
+                        📝 变量名
+                      </label>
+                      <input
+                        type="text"
+                        value={editingVariableName?.originalName === varName ? editingVariableName.tempName : varName}
+                        onChange={(e) => {
+                          setEditingVariableName({ originalName: varName, tempName: e.target.value });
+                        }}
+                        onBlur={() => {
+                          if (editingVariableName && editingVariableName.originalName === varName && editingVariableName.tempName !== varName) {
+                            const newVariables = { ...localData.smart_variables };
+                            const newName = editingVariableName.tempName;
+                            
+                            if (newName && !newVariables[newName]) { // 确保新名称不为空且不重复
+                              newVariables[newName] = newVariables[varName];
+                            delete newVariables[varName];
+                            updateNodeData({ smart_variables: newVariables });
+                          }
+                          }
+                          setEditingVariableName(null); // 清除编辑状态
+                        }}
+                        onFocus={() => {
+                          setEditingVariableName({ originalName: varName, tempName: varName });
+                        }}
+                        placeholder="例如: customer_name"
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          fontSize: '13px',
+                          fontFamily: 'monospace',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
+                        📋 显示名称
+                      </label>
+                      <input
+                        type="text"
+                        value={varConfig.display_name || ''}
+                        onChange={(e) => {
+                          const newVariables = { ...localData.smart_variables };
+                          newVariables[varName] = { ...newVariables[varName], display_name: e.target.value };
+                          updateNodeData({ smart_variables: newVariables });
+                        }}
+                        placeholder="例如: 客户姓名"
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          fontSize: '13px',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: '12px' }}>
+                    <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
+                      🔗 数据源
+                    </label>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <input
+                        type="text"
+                        value={varConfig.source || ''}
+                        onChange={(e) => {
+                          const newVariables = { ...localData.smart_variables };
+                          newVariables[varName] = { ...newVariables[varName], source: e.target.value };
+                          updateNodeData({ smart_variables: newVariables });
+                        }}
+                        placeholder="例如: {{trigger.name}} 或 {{db.customer.phone}}"
+                        style={{
+                          flex: 1,
+                          padding: '8px 12px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          fontSize: '13px',
+                          fontFamily: 'monospace'
+                        }}
+                      />
+                      <button
+                        onClick={(e) => {
+                          setShowVariableSelector({ show: true, position: `smart_var_${varName}` });
+                          fetchCustomerFields();
+                        }}
+                        style={{
+                          background: '#3b82f6',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          padding: '8px 12px',
+                          fontSize: '12px',
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        @ 选择
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
+                        🔄 数据转换
+                      </label>
+                      <select
+                        value={varConfig.transformer || 'None'}
+                        onChange={(e) => {
+                          const newVariables = { ...localData.smart_variables };
+                          newVariables[varName] = { ...newVariables[varName], transformer: e.target.value };
+                          updateNodeData({ smart_variables: newVariables });
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '8px 12px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '6px',
+                          fontSize: '12px'
+                        }}
+                      >
+                        <option value="None">无转换</option>
+                        <option value="First Word">取首词</option>
+                        <option value="Last Word">取末词</option>
+                        <option value="Last 4 Digits">取后4位</option>
+                        <option value="First 4 Digits">取前4位</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
+                        📊 预览效果
+                      </label>
+                      <div style={{
+                        padding: '8px 12px',
+                        background: '#f8fafc',
+                        border: '1px solid #e2e8f0',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        fontFamily: 'monospace',
+                        color: '#475569'
+                      }}>
+                        {(() => {
+                          const sampleValue = varConfig.source?.includes('name') ? '张三丰' :
+                                            varConfig.source?.includes('phone') ? '13812345678' :
+                                            varConfig.source?.includes('message') ? '你好世界' : '示例值';
+                          
+                          let transformedValue = sampleValue;
+                          if (varConfig.transformer === 'First Word') {
+                            transformedValue = sampleValue.split(' ')[0] || sampleValue.charAt(0);
+                          } else if (varConfig.transformer === 'Last Word') {
+                            const words = sampleValue.split(' ');
+                            transformedValue = words[words.length - 1] || sampleValue;
+                          } else if (varConfig.transformer === 'Last 4 Digits') {
+                            transformedValue = sampleValue.slice(-4);
+                          } else if (varConfig.transformer === 'First 4 Digits') {
+                            transformedValue = sampleValue.slice(0, 4);
+                          }
+                          
+                          return varConfig.transformer === 'None' ? 
+                            transformedValue : 
+                            `"${sampleValue}" → "${transformedValue}"`;
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* 添加变量按钮 */}
+            <button
+              onClick={() => {
+                const variables = localData.smart_variables || {};
+                const nextKey = `var_${Object.keys(variables).length + 1}`;
+                updateNodeData({ 
+                  smart_variables: {
+                    ...variables,
+                    [nextKey]: {
+                      displayName: '',
+                      source: '',
+                      transformer: 'None',
+                      description: ''
+                    }
+                  }
+                });
+              }}
+              style={{
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '12px',
+                padding: '12px 24px',
+                fontSize: '14px',
+                cursor: 'pointer',
+                fontWeight: '600',
+                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.25)',
+                transition: 'all 0.2s ease'
+              }}
+            >
+              ➕ 添加新变量
+            </button>
+
+            {/* 使用说明 */}
+            <div style={{ 
+              fontSize: '12px', 
+              color: '#666', 
+              marginTop: '16px', 
+              padding: '16px', 
+              background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)', 
+              borderRadius: '12px',
+              border: '1px solid #0ea5e9'
+            }}>
+              <strong>💡 使用方法：</strong><br/>
+              <div style={{ marginTop: '8px', fontFamily: 'monospace', fontSize: '11px', lineHeight: '1.6' }}>
+                <strong>1. 在请求体中引用变量：</strong><br/>
+                • 使用 <code style={{background: '#fff', padding: '2px 4px', borderRadius: '3px'}}>{'{{变量名}}'}</code> 格式<br/>
+                • 例如：<code style={{background: '#fff', padding: '2px 4px', borderRadius: '3px'}}>{'{{customer_name}}'}</code><br/><br/>
+                
+                <strong>2. 智能提示：</strong><br/>
+                • 在请求体中输入 <code style={{background: '#fff', padding: '2px 4px', borderRadius: '3px'}}>{'{{{'}</code> 会自动显示可用变量<br/>
+                • 支持变量名搜索和自动补全
+              </div>
+            </div>
+          </div>
+
+          {/* 请求体配置 */}
+          <div className="config-field">
+            <label>📝 请求体配置</label>
+            
+            {/* 请求体编辑器 - 全宽度 */}
+            <div style={{ position: 'relative', marginBottom: '16px' }}>
             <textarea
               ref={(el) => { if (el) inputRefs.current['body'] = el; }}
               value={localData.body || ''}
@@ -2655,37 +3847,156 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               onKeyDown={(e) => handleInputKeyDown(e, 'body')}
               onSelect={(e) => handleInputSelect(e, 'body')}
               placeholder={`{
-  "name": "{{db.customer.name}}",
-  "phone": "{{trigger.phone}}",
-  "message": "{{trigger.message}}",
-  "user_id": "{{trigger.user_id}}"
+  "name": "{{customer_name}}",
+  "phone": "{{phone_last4}}",
+  "message": "{{trigger.message}}"
 }
 
-提示：输入 @ 可快速选择变量`}
-              rows={8}
-              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+💡 输入 {{ 获得智能提示`}
+                    style={{ 
+                      fontFamily: 'monospace', 
+                      fontSize: '13px',
+                      minHeight: '200px',
+                      width: '100%',
+                  padding: '12px 50px 12px 12px',
+                      border: '2px solid #e2e8f0',
+                      borderRadius: '8px',
+                  resize: 'vertical',
+                  boxSizing: 'border-box'
+                    }}
             />
+              <div style={{ position: 'absolute', right: '8px', top: '8px', display: 'flex', gap: '4px' }}>
             <button
               onClick={(e) => openVariableSelector(e, 'body')}
               style={{
-                position: 'absolute',
-                right: '8px',
-                top: '8px',
                 background: '#3b82f6',
                 color: 'white',
                 border: 'none',
-                borderRadius: '4px',
-                padding: '4px 8px',
+                      borderRadius: '6px',
+                      padding: '6px 12px',
                 fontSize: '12px',
                 cursor: 'pointer'
               }}
             >
-              @变量
+                    @ 变量
             </button>
+                {Object.keys(localData.smart_variables || {}).length > 0 && (
+                  <button
+                    onClick={(e) => openVariableSelector(e, 'smart_body')}
+                    style={{
+                      background: '#f59e0b',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      padding: '6px 12px',
+                      fontSize: '12px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    🔗 智能变量
+                  </button>
+                )}
           </div>
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-            💡 JSON 格式 | 输入 @ 快速选择变量 | 点击 "@变量" 按钮浏览所有可用变量
           </div>
+
+            {/* 变量面板 - 全宽度 */}
+              <div style={{
+                background: '#f8fafc',
+                border: '1px solid #e2e8f0',
+                borderRadius: '8px',
+              padding: '16px'
+              }}>
+                <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#374151' }}>
+                  💡 可用变量
+                </h4>
+              
+              {/* 自定义变量部分 */}
+              {Object.keys(localData.smart_variables || {}).length > 0 && (
+                <div style={{ marginBottom: '16px' }}>
+                      <div style={{ marginBottom: '12px' }}>
+                    <strong style={{ color: '#059669', fontSize: '13px' }}>🔧 自定义变量：</strong>
+                      </div>
+                  <div style={{ 
+                    display: 'grid', 
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+                    gap: '8px' 
+                  }}>
+                      {Object.entries(localData.smart_variables || {}).map(([varName, varConfig]: [string, any]) => (
+                        <div key={varName} style={{ 
+                        padding: '8px 12px',
+                          background: 'white',
+                          borderRadius: '6px',
+                          border: '1px solid #e5e7eb'
+                        }}>
+                        <div style={{ 
+                          fontFamily: 'monospace', 
+                          fontWeight: '600', 
+                          color: '#1e293b',
+                          fontSize: '12px'
+                        }}>
+                            {'{{' + varName + '}}'}
+                          </div>
+                        <div style={{ color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
+                            {varConfig.displayName || '未命名变量'}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                    </div>
+                  )}
+                  
+              {/* 系统变量部分 */}
+              <div>
+                  <div style={{ marginBottom: '8px' }}>
+                  <strong style={{ color: '#3b82f6', fontSize: '13px' }}>🎯 系统变量：</strong>
+                  </div>
+                <div style={{ 
+                  display: 'grid', 
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', 
+                  gap: '6px',
+                  fontSize: '11px', 
+                  color: '#64748b' 
+                }}>
+                  <div>• {'{{trigger.name}}'} - 发送者姓名</div>
+                  <div>• {'{{trigger.phone}}'} - 发送者电话</div>
+                  <div>• {'{{trigger.message}}'} - 消息内容</div>
+                  <div>• {'{{db.customer.name}}'} - 客户姓名</div>
+                  <div>• {'{{db.customer.phone}}'} - 客户电话</div>
+                  <div>• 更多变量请点击 "@ 变量" 查看</div>
+                  </div>
+                </div>
+              
+              {Object.keys(localData.smart_variables || {}).length === 0 && (
+                <div style={{ 
+                  textAlign: 'center', 
+                  color: '#9ca3af', 
+                  padding: '16px',
+                  fontStyle: 'italic',
+                  fontSize: '12px',
+                  marginTop: '12px',
+                  background: 'white',
+                  borderRadius: '6px',
+                  border: '1px dashed #d1d5db'
+                }}>
+                  暂无自定义变量，点击上方"添加新变量"开始配置
+              </div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* 原有的非POST/PUT方法的配置保持不变 */}
+      {(localData.method !== 'POST' && localData.method !== 'PUT') && (
+        <div style={{ 
+          padding: '16px', 
+          background: '#f8fafc', 
+          borderRadius: '8px',
+          border: '1px solid #e2e8f0',
+          textAlign: 'center',
+          color: '#64748b'
+        }}>
+          💡 GET 和 DELETE 请求不需要配置请求体
         </div>
       )}
 
@@ -2774,6 +4085,9 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     switch (node.type) {
       case 'MessageTrigger':
         return renderMessageTriggerConfig()
+      case 'DbTrigger':
+      case 'StatusTrigger': // 向后兼容：旧的StatusTrigger使用DbTrigger配置
+        return renderDbTriggerConfig()
       case 'AI':
         return renderAIConfig()
       case 'Handoff':
@@ -3037,9 +4351,15 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                 <label>值</label>
                                 {condition.field === 'db.customer.stage_id' ? (
                                   <select
-                                    value={condition.value || ''}
-                                    onChange={(e) => updateCondition(condition.id, { value: e.target.value })}
-                                    style={{ flex: 1 }}
+                                    value={localData.config?.value || ''}
+                                    onChange={(e) => {
+                                      updateNodeData({
+                                        config: {
+                                          ...localData.config,
+                                          value: e.target.value,
+                                        }
+                                      });
+                                    }}
                                   >
                                     <option value="">选择阶段...</option>
                                     {customerStages.map((stage: any) => (
@@ -3283,6 +4603,17 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     }
   };
 
+  // 获取客户阶段（用于 stage_id 字段的下拉选择）
+  async function fetchCustomerStages() {
+    try {
+      const response = await api.get('/api/pipeline/stages');
+      setCustomerStages(response || []);
+    } catch (e) {
+      console.error('Error fetching customer stages:', e);
+      setCustomerStages([]);
+    }
+  }
+
   return (
       <div className="node-config-panel" style={{ 
         background: '#ffffff', 
@@ -3439,7 +4770,101 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               overflow: 'auto',
               paddingRight: '8px'
             }}>
-            {Object.entries(availableVariables).map(([category, variables]) => (
+            {showVariableSelector.position === 'smart_body' ? (
+              // 智能变量专用显示
+              <div style={{ marginBottom: '24px' }}>
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  marginBottom: '16px',
+                  padding: '12px 16px',
+                  background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(217, 119, 6, 0.08) 100%)',
+                  borderRadius: '12px',
+                  border: '1px solid rgba(245, 158, 11, 0.15)'
+                }}>
+                  <div style={{
+                    width: '8px',
+                    height: '8px',
+                    borderRadius: '50%',
+                    background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                    marginRight: '12px'
+                  }}></div>
+                  <h5 style={{ 
+                    margin: 0, 
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    color: '#1e293b'
+                  }}>
+                    🔗 智能变量
+                  </h5>
+                </div>
+                
+                {/* 智能变量列表 */}
+                <div style={{ display: 'grid', gap: '12px' }}>
+                  {Object.entries(localData.smart_variables || {}).map(([varName, varConfig]: [string, any]) => (
+                    <div
+                      key={varName}
+                      onClick={() => handleVariableSelect(`{{${varName}}}`)}
+                      style={{
+                        padding: '16px',
+                        background: 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)',
+                        borderRadius: '12px',
+                        border: '2px solid rgba(245, 158, 11, 0.2)',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        position: 'relative'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-2px)';
+                        e.currentTarget.style.boxShadow = '0 8px 25px rgba(245, 158, 11, 0.15)';
+                        e.currentTarget.style.borderColor = '#f59e0b';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'translateY(0)';
+                        e.currentTarget.style.boxShadow = 'none';
+                        e.currentTarget.style.borderColor = 'rgba(245, 158, 11, 0.2)';
+                      }}
+                    >
+                      <div style={{
+                        fontSize: '14px',
+                        fontWeight: '600',
+                        color: '#92400e',
+                        marginBottom: '8px',
+                        fontFamily: 'monospace'
+                      }}>
+                        {`{{${varName}}}`}
+                      </div>
+                      <div style={{
+                        fontSize: '13px',
+                        color: '#a16207',
+                        marginBottom: '4px'
+                      }}>
+                        📋 {varConfig.display_name || varName}
+                      </div>
+                      <div style={{
+                        fontSize: '12px',
+                        color: '#a16207',
+                        opacity: 0.8
+                      }}>
+                        🔗 数据源: {varConfig.data_source || '未设置'}
+                      </div>
+                      {varConfig.data_transformation && (
+                        <div style={{
+                          fontSize: '12px',
+                          color: '#a16207',
+                          opacity: 0.8,
+                          marginTop: '4px'
+                        }}>
+                          🔄 转换: {varConfig.data_transformation}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              // 普通变量显示
+              Object.entries(availableVariables).map(([category, variables]) => (
                 <div key={category} style={{ marginBottom: '24px' }}>
                   {/* 分类标题 */}
                   <div style={{
@@ -3676,7 +5101,8 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                     })}
                 </div>
               </div>
-            ))}
+            ))
+            )}
           </div>
 
             {/* 底部操作区域 */}
@@ -3958,37 +5384,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                     <div
                                       key={mediaIndex}
                                       onClick={() => {
-                                        const tag = `[[MEDIA:${media.id}]]`;
-                                        let updatedPrompt = '';
-                                        let currentPrompt = '';
-
-                                        if (showMediaSelector.position === 'system_prompt') {
-                                          if (selectedPromptId) {
-                                            setPromptLibrary(promptLibrary.map((p: any) => 
-                                              p.id === selectedPromptId 
-                                                ? { ...p, system_prompt: (p.system_prompt || '') + tag }
-                                                : p
-                                            ));
-                                          } else {
-                                          currentPrompt = localData.system_prompt || '';
-                                          updatedPrompt = currentPrompt + tag;
-                                          updateNodeData({ system_prompt: updatedPrompt });
-                                          }
-                                        } else if (showMediaSelector.position === 'user_prompt') {
-                                          if (selectedPromptId) {
-                                            setPromptLibrary(promptLibrary.map((p: any) => 
-                                              p.id === selectedPromptId 
-                                                ? { ...p, user_prompt: (p.user_prompt || '') + tag }
-                                                : p
-                                            ));
-                                          } else {
-                                          currentPrompt = localData.user_prompt || '';
-                                          updatedPrompt = currentPrompt + tag;
-                                          updateNodeData({ user_prompt: updatedPrompt });
-                                          }
-                                        }
-
-                                        setShowMediaSelector({ show: false });
+                                        handleMediaSelect(media.id, media.filename);
                                       }}
                                       style={{
                                         padding: '6px',
@@ -4068,37 +5464,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                         <div
                           key={index}
                           onClick={() => {
-                            const tag = `[[MEDIA:${media.id}]]`;
-                            let updatedPrompt = '';
-                            let currentPrompt = '';
-
-                            if (showMediaSelector.position === 'system_prompt') {
-                              if (selectedPromptId) {
-                                setPromptLibrary(promptLibrary.map((p: any) => 
-                                  p.id === selectedPromptId 
-                                    ? { ...p, system_prompt: (p.system_prompt || '') + tag }
-                                    : p
-                                ));
-                              } else {
-                              currentPrompt = localData.system_prompt || '';
-                              updatedPrompt = currentPrompt + tag;
-                              updateNodeData({ system_prompt: updatedPrompt });
-                              }
-                            } else if (showMediaSelector.position === 'user_prompt') {
-                              if (selectedPromptId) {
-                                setPromptLibrary(promptLibrary.map((p: any) => 
-                                  p.id === selectedPromptId 
-                                    ? { ...p, user_prompt: (p.user_prompt || '') + tag }
-                                    : p
-                                ));
-                              } else {
-                              currentPrompt = localData.user_prompt || '';
-                              updatedPrompt = currentPrompt + tag;
-                              updateNodeData({ user_prompt: updatedPrompt });
-                              }
-                            }
-
-                            setShowMediaSelector({ show: false });
+                            handleMediaSelect(media.id, media.filename);
                           }}
                           style={{
                             padding: '8px',
@@ -4119,6 +5485,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                           }}
                         >
                           {media.file_url && media.media_type === 'image' ? (
+                            <div style={{ position: 'relative' }}>
                             <img 
                               src={media.file_url} 
                               alt={media.filename}
@@ -4130,6 +5497,29 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                 marginBottom: '4px'
                               }}
                             />
+                              <div
+                                style={{
+                                  position: 'absolute',
+                                  top: '4px',
+                                  right: '4px',
+                                  background: 'rgba(0, 0, 0, 0.5)',
+                                  borderRadius: '50%',
+                                  padding: '4px',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  cursor: 'pointer',
+                                  zIndex: 10
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPreviewImageUrl(media.file_url);
+                                  setShowImagePreviewModal(true);
+                                }}
+                              >
+                                👁️
+                              </div>
+                            </div>
                           ) : (
                             <div style={{ 
                               width: '100%', 
@@ -4852,6 +6242,64 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         </div>
       )}
 
+      {/* 图片预览弹窗 */}
+      {showImagePreviewModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999
+        }}>
+          <div style={{
+            position: 'relative',
+            maxWidth: '90vw',
+            maxHeight: '90vh',
+            background: 'white',
+            borderRadius: '12px',
+            padding: '20px',
+            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)'
+          }}>
+            <button
+              onClick={() => setShowImagePreviewModal(false)}
+              style={{
+                position: 'absolute',
+                top: '10px',
+                right: '10px',
+                background: 'rgba(0, 0, 0, 0.5)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '50%',
+                width: '30px',
+                height: '30px',
+                cursor: 'pointer',
+                fontSize: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 10000
+              }}
+            >
+              ×
+            </button>
+            <img
+              src={previewImageUrl}
+              alt="预览"
+              style={{
+                maxWidth: '80vw',
+                maxHeight: '80vh',
+                objectFit: 'contain',
+                borderRadius: '8px'
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -157,7 +157,11 @@ class Message(Base):
     id = Column(get_uuid_column(), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     content = Column(Text, nullable=False)
     direction = Column(String, nullable=False)  # inbound, outbound
+    channel = Column(String, nullable=True)  # 新增: 消息来源渠道 (e.g., 'whatsapp', 'telegram')
     whatsapp_id = Column(String, nullable=True, index=True)  # WhatsApp消息ID
+    telegram_message_id = Column(String, nullable=True, index=True) # 新增: Telegram 消息ID
+    media_type = Column(String, nullable=True) # 新增：媒体类型 (e.g., 'audio/ogg', 'image/jpeg')
+    transcription = Column(Text, nullable=True) # 新增：语音消息转录文本
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     ack = Column(Integer, default=0)  # 0: sent, 1: delivered, 2: read, 3: read by recipient
     customer_id = Column(get_uuid_column(), ForeignKey("customers.id"), nullable=False)

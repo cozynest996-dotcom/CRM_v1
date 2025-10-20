@@ -53,6 +53,11 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const [showKnowledgeBaseSelector, setShowKnowledgeBaseSelector] = useState<{show: boolean, position?: string, anchor?: DOMRect }>({ show: false })
   const [knowledgeBases, setKnowledgeBases] = useState<any[]>([]) // 新增：知识库列表
   const [showAdvancedApiConfig, setShowAdvancedApiConfig] = React.useState(false) // CustomAPI 的高级配置开关
+  // Template 配置相关状态
+  const [showSmartVarHelp, setShowSmartVarHelp] = React.useState(false)
+  const [showMediaHelp, setShowMediaHelp] = React.useState(false)
+  const [showTemplateHelp, setShowTemplateHelp] = React.useState(false)
+  const [showApiSmartVarHelp, setShowApiSmartVarHelp] = React.useState(false)
   // DbTrigger 相关状态
   const [dbTriggerFields, setDbTriggerFields] = useState<Array<{key: string, label: string, type: string}>>([])
   const [loadingDbFields, setLoadingDbFields] = useState(false)
@@ -595,6 +600,26 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     } else if (position?.startsWith('static_')) {
       const updateId = position.replace('static_', '');
       insertTextAtCursor(`static_${updateId}`, finalVariableValue);
+    } else if (position?.startsWith('smart_template_')) {
+      // 处理模板消息的智能变量注入
+      const templateIndex = parseInt(position.replace('smart_template_', ''));
+      const currentMessages = localData.message_templates || [];
+      if (currentMessages[templateIndex]) {
+        const updatedMessages = currentMessages.map((msg, i) => 
+          i === templateIndex 
+            ? { ...msg, content: (msg.content || '') + finalVariableValue }
+            : msg
+        );
+        updateNodeData({ message_templates: updatedMessages });
+      }
+    } else if (position?.startsWith('smart_var_template_')) {
+      // 处理模板消息智能变量的数据源选择
+      const varName = position.replace('smart_var_template_', '');
+      const smartVariables = localData.smart_variables || {};
+      if (smartVariables[varName]) {
+        smartVariables[varName] = { ...smartVariables[varName], source: finalVariableValue };
+        updateNodeData({ smart_variables: smartVariables });
+      }
     } else if (position?.startsWith('smart_var_')) {
       // 处理智能变量的数据源选择
       const varName = position.replace('smart_var_', '');
@@ -643,194 +668,333 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     </>
   )
 
-  const renderDbTriggerConfig = () => (
-    <>
-      <div className="config-field">
-        <label>数据表</label>
-        <select 
-          value={localData.config?.table || 'customers'} 
-          onChange={(e) => {
-            updateNodeData({
-              config: {
-                ...localData.config,
-                table: e.target.value,
-              }
-            });
-          }}
-        >
-          <option value="customers">🗄️ customers (客户表)</option>
-        </select>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          选择要监听的数据表
-        </div>
-      </div>
+  const renderDbTriggerConfig = () => {
+    const triggerMode = localData.config?.trigger_mode || 'immediate'
+    const isScheduled = triggerMode === 'scheduled' || triggerMode === 'hybrid'
+    const isImmediate = triggerMode === 'immediate' || triggerMode === 'hybrid'
+    
+    return (
+      <>
 
-      <div className="config-field">
-        <label>监听字段</label>
-        <select 
-          value={localData.config?.field || ''} 
-          onChange={(e) => {
-            updateNodeData({
-              config: {
-                ...localData.config,
-                field: e.target.value,
-              }
-            });
-          }}
-          disabled={loadingDbFields}
-        >
-          <option value="">{loadingDbFields ? '加载字段中...' : '请选择字段...'}</option>
-          {dbTriggerFields.map(field => (
-            <option key={field.key} value={field.key}>
-              📊 {field.label} ({field.key}) - {field.type}
-            </option>
-          ))}
-        </select>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          选择要监听变化的字段，支持所有 customers 表字段
-        </div>
-      </div>
+        {/* 触发条件 */}
+        <div className="config-section" style={{ marginBottom: '24px' }}>
+          <h3 style={{ 
+            fontSize: '14px',
+            fontWeight: '600',
+            color: '#334155',
+            marginBottom: '16px',
+            paddingBottom: '8px',
+            borderBottom: '2px solid #e2e8f0'
+          }}>
+            🎯 触发条件
+          </h3>
 
-      <div className="config-field">
-        <label>触发条件</label>
-        <select 
-          value={localData.config?.condition || 'equals'} 
-          onChange={(e) => {
-            updateNodeData({
-              config: {
-                ...localData.config,
-                condition: e.target.value,
-              }
-            });
-          }}
-        >
-          <option value="equals">🎯 等于 (=)</option>
-          <option value="not_equals">❌ 不等于 (≠)</option>
-          <option value="contains">🔍 包含</option>
-          <option value="not_contains">🚫 不包含</option>
-          <option value="starts_with">▶️ 开头是</option>
-          <option value="ends_with">⏹️ 结尾是</option>
-          <option value="is_empty">⚪ 为空</option>
-          <option value="is_not_empty">⚫ 不为空</option>
-          <option value="changed">🔄 发生变化</option>
-        </select>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          设置字段值的匹配条件
-        </div>
-      </div>
-
-      {localData.config?.condition && !['is_empty', 'is_not_empty', 'changed'].includes(localData.config.condition) && (
-        <div className="config-field">
-          <label>匹配值</label>
-          {localData.config?.field === 'stage_id' ? (
-            <select
-              value={localData.config?.value || ''}
+          <div className="config-field">
+            <label>数据表</label>
+            <select 
+              value={localData.config?.table || 'customers'} 
               onChange={(e) => {
                 updateNodeData({
                   config: {
                     ...localData.config,
-                    value: e.target.value,
+                    table: e.target.value,
                   }
                 });
               }}
             >
-              <option value="">选择阶段...</option>
-              {customerStages.map((stage: any) => (
-                <option key={stage.id} value={stage.id}>
-                  {stage.name} {stage.description ? `(${stage.description})` : ''}
-                </option>
-              ))}
+              <option value="customers">customers (客户表)</option>
             </select>
-          ) : (
-            <input
-              type="text"
-              value={localData.config?.value || ''}
+          </div>
+
+          <div className="config-field">
+            <label>监听字段</label>
+            <select 
+              value={localData.config?.field || ''} 
               onChange={(e) => {
                 updateNodeData({
                   config: {
                     ...localData.config,
-                    value: e.target.value,
+                    field: e.target.value,
                   }
                 });
               }}
-              placeholder="输入要匹配的值"
-            />
+              disabled={loadingDbFields}
+            >
+              <option value="">{loadingDbFields ? '加载字段中...' : '请选择字段...'}</option>
+              {dbTriggerFields.map(field => (
+                <option key={field.key} value={field.key}>
+                  {field.label} ({field.key})
+                </option>
+              ))}
+            </select>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              选择要监听变化的客户字段，如 stage_id（客户阶段）、status（状态）等
+            </div>
+          </div>
+
+          <div className="config-field">
+            <label>触发条件</label>
+            <select 
+              value={localData.config?.condition || 'equals'} 
+              onChange={(e) => {
+                updateNodeData({
+                  config: {
+                    ...localData.config,
+                    condition: e.target.value,
+                  }
+                });
+              }}
+            >
+              <option value="equals">等于 (=)</option>
+              <option value="not_equals">不等于 (≠)</option>
+              <option value="contains">包含</option>
+              <option value="not_contains">不包含</option>
+              <option value="starts_with">开头是</option>
+              <option value="ends_with">结尾是</option>
+              <option value="is_empty">为空</option>
+              <option value="is_not_empty">不为空</option>
+            </select>
+          </div>
+
+          {localData.config?.condition && !['is_empty', 'is_not_empty', 'changed'].includes(localData.config.condition) && (
+            <div className="config-field">
+              <label>匹配值</label>
+              {localData.config?.field === 'stage_id' ? (
+                <select
+                  value={localData.config?.value || ''}
+                  onChange={(e) => {
+                    updateNodeData({
+                      config: {
+                        ...localData.config,
+                        value: e.target.value,
+                      }
+                    });
+                  }}
+                >
+                  <option value="">选择阶段...</option>
+                  {customerStages.map((stage: any) => (
+                    <option key={stage.id} value={stage.id}>
+                      {stage.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={localData.config?.value || ''}
+                  onChange={(e) => {
+                    updateNodeData({
+                      config: {
+                        ...localData.config,
+                        value: e.target.value,
+                      }
+                    });
+                  }}
+                  placeholder="输入要匹配的值"
+                />
+              )}
+            </div>
           )}
-          <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-            {localData.config?.field === 'stage_id' 
-              ? '选择要匹配的客户阶段' 
-              : '输入字段值需要匹配的内容'
-            }
+        </div>
+
+        {/* 触发模式 */}
+        <div className="config-section" style={{ marginBottom: '24px' }}>
+          <h3 style={{ 
+            fontSize: '14px',
+            fontWeight: '600',
+            color: '#334155',
+            marginBottom: '16px',
+            paddingBottom: '8px',
+            borderBottom: '2px solid #e2e8f0'
+          }}>
+            ⚙️ 触发模式
+          </h3>
+
+          <div className="config-field">
+            <label>模式选择</label>
+            <select 
+              value={triggerMode} 
+              onChange={(e) => {
+                updateNodeData({
+                  config: {
+                    ...localData.config,
+                    trigger_mode: e.target.value,
+                  }
+                });
+              }}
+            >
+              <option value="immediate">⚡ 即时触发（状态改变时）</option>
+              <option value="scheduled">📅 定时触发（定期检查）</option>
+              <option value="hybrid">🔄 混合模式（即时 + 定时）</option>
+            </select>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              {triggerMode === 'immediate' && '⚡ 即时触发：客户状态改变时触发一次，推荐用于欢迎消息、状态通知等一次性操作'}
+              {triggerMode === 'scheduled' && '📅 定时触发：定期检查并提醒符合条件的客户，推荐用于催款提醒、定期跟进等周期性任务'}
+              {triggerMode === 'hybrid' && '🔄 混合模式：结合即时触发和定时触发，推荐用于重要业务流程、关键客户跟进'}
+            </div>
+          </div>
+
+          {/* 定时触发配置 */}
+          {isScheduled && (
+            <>
+              <div className="config-field">
+                <label>触发间隔</label>
+                <select 
+                  value={localData.config?.schedule?.interval || 86400} 
+                  onChange={(e) => {
+                    updateNodeData({
+                      config: {
+                        ...localData.config,
+                        schedule: {
+                          ...(localData.config?.schedule || {}),
+                          interval: parseInt(e.target.value),
+                          enabled: true
+                        }
+                      }
+                    });
+                  }}
+                >
+                  <option value="60">1 分钟（仅测试用）</option>
+                  <option value="300">5 分钟</option>
+                  <option value="900">15 分钟</option>
+                  <option value="1800">30 分钟</option>
+                  <option value="3600">1 小时</option>
+                  <option value="21600">6 小时</option>
+                  <option value="86400">24 小时（推荐）</option>
+                </select>
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  系统会按此间隔定期检查符合条件的客户并触发工作流
+                </div>
+              </div>
+
+              <div className="config-field">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <input 
+                    type="checkbox" 
+                    checked={localData.config?.prevent_duplicate_triggers !== false} 
+                    onChange={(e) => {
+                      updateNodeData({
+                        config: {
+                          ...localData.config,
+                          prevent_duplicate_triggers: e.target.checked,
+                        }
+                      });
+                    }}
+                  />
+                  防止重复触发同一客户
+                </label>
+                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  {localData.config?.prevent_duplicate_triggers !== false 
+                    ? '✓ 已开启：同一客户在间隔周期内只触发一次，防止频繁打扰客户（强烈推荐）'
+                    : '⚠️ 未开启：可能导致重复触发，客户会频繁收到消息'}
+                </div>
+              </div>
+
+              {localData.config?.prevent_duplicate_triggers === false && (
+                <div style={{ 
+                  fontSize: '13px', 
+                  color: '#dc2626', 
+                  padding: '12px',
+                  background: '#fef2f2',
+                  borderRadius: '8px',
+                  border: '1px solid #fecaca',
+                  marginTop: '8px'
+                }}>
+                  ⚠️ 警告：未开启去重可能导致客户每{(() => {
+                    const interval = localData.config?.schedule?.interval || 86400
+                    if (interval < 60) return `${interval}秒`
+                    if (interval < 3600) return `${interval / 60}分钟`
+                    if (interval < 86400) return `${interval / 3600}小时`
+                    return `${interval / 86400}天`
+                  })()}收到一次消息，建议开启
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* 其他设置 */}
+        <div className="config-section">
+          <h3 style={{ 
+            fontSize: '14px',
+            fontWeight: '600',
+            color: '#334155',
+            marginBottom: '16px',
+            paddingBottom: '8px',
+            borderBottom: '2px solid #e2e8f0'
+          }}>
+            🔧 其他设置
+          </h3>
+
+          {isImmediate && (
+            <div className="config-field">
+              <label>防抖设置</label>
+              <select 
+                value={localData.config?.frequency || 'immediate'} 
+                onChange={(e) => {
+                  updateNodeData({
+                    config: {
+                      ...localData.config,
+                      frequency: e.target.value,
+                    }
+                  });
+                }}
+              >
+                <option value="immediate">立即触发</option>
+                <option value="debounce_1s">防抖 1秒</option>
+                <option value="debounce_5s">防抖 5秒</option>
+                <option value="debounce_30s">防抖 30秒</option>
+              </select>
+              <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                防抖可避免短时间内频繁触发，适用于即时触发模式
+              </div>
+            </div>
+          )}
+
+          <div className="config-field">
+            <label>触发平台</label>
+            <select 
+              value={localData.config?.trigger_platform || 'whatsapp'} 
+              onChange={(e) => {
+                updateNodeData({
+                  config: {
+                    ...localData.config,
+                    trigger_platform: e.target.value,
+                  }
+                });
+              }}
+            >
+              <option value="whatsapp">📱 WhatsApp</option>
+              <option value="telegram">💬 Telegram</option>
+              <option value="auto">🤖 自动检测</option>
+            </select>
+            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+              {localData.config?.trigger_platform === 'whatsapp' && 'WhatsApp: 使用客户的 phone 字段'}
+              {localData.config?.trigger_platform === 'telegram' && 'Telegram: 使用客户的 telegram_chat_id 字段'}
+              {localData.config?.trigger_platform === 'auto' && '自动检测: 优先使用 WhatsApp，若无则使用 Telegram'}
+            </div>
+          </div>
+
+          <div className="config-field">
+            <label>描述（可选）</label>
+            <input
+              type="text"
+              value={localData.config?.description || ''}
+              onChange={(e) => {
+                updateNodeData({
+                  config: {
+                    ...localData.config,
+                    description: e.target.value,
+                  }
+                });
+              }}
+              placeholder="为触发器添加说明..."
+            />
           </div>
         </div>
-      )}
-
-      <div className="config-field">
-        <label>触发平台</label>
-        <select 
-          value={localData.config?.trigger_platform || 'whatsapp'} 
-          onChange={(e) => {
-            updateNodeData({
-              config: {
-                ...localData.config,
-                trigger_platform: e.target.value,
-              }
-            });
-          }}
-        >
-          <option value="whatsapp">📱 WhatsApp (使用 phone 字段)</option>
-          <option value="telegram">💬 Telegram (使用 telegram_chat_id 字段)</option>
-          <option value="auto">🤖 自动检测 (优先 WhatsApp，回退到 Telegram)</option>
-        </select>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          选择触发后续节点时使用的通信平台
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>触发频率</label>
-        <select 
-          value={localData.config?.frequency || 'immediate'} 
-          onChange={(e) => {
-            updateNodeData({
-              config: {
-                ...localData.config,
-                frequency: e.target.value,
-              }
-            });
-          }}
-        >
-          <option value="immediate">⚡ 立即触发</option>
-          <option value="debounce_1s">⏱️ 防抖 1秒</option>
-          <option value="debounce_5s">⏱️ 防抖 5秒</option>
-          <option value="debounce_30s">⏱️ 防抖 30秒</option>
-        </select>
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          设置触发的频率控制，防抖可避免频繁触发
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>描述</label>
-        <input
-          type="text"
-          value={localData.config?.description || ''}
-          onChange={(e) => {
-            updateNodeData({
-              config: {
-                ...localData.config,
-                description: e.target.value,
-              }
-            });
-          }}
-          placeholder="触发器描述（可选）"
-        />
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          为这个触发器添加描述说明
-        </div>
-      </div>
-    </>
-  )
+      </>
+    )
+  }
 
   const renderAIConfig = () => {
     const toggleSection = (section: string) => {
@@ -2019,6 +2183,121 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           </div>
         </div>
 
+        {/* 新客户创建配置 */}
+        <div className="config-field">
+          <div style={{ 
+            padding: '16px', 
+            background: '#f8fafc', 
+            borderRadius: '12px',
+            border: '1px solid #e2e8f0',
+            marginBottom: '8px'
+          }}>
+            <div style={{ fontSize: '14px', color: '#374151', marginBottom: '12px', fontWeight: '600' }}>
+              👤 新客户创建设置
+            </div>
+            
+            {/* 第一层：是否启用创建新客户 */}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={localData.enable_create_customer || false}
+                  onChange={(e) => updateNodeData({ 
+                    enable_create_customer: e.target.checked,
+                    // 如果禁用创建新客户，清除默认阶段设置
+                    default_stage_id: e.target.checked ? localData.default_stage_id : null
+                  })}
+                  style={{ marginRight: '8px' }}
+                />
+                <span style={{ fontWeight: '500' }}>启用创建新客户</span>
+              </label>
+              <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px', marginLeft: '24px' }}>
+                当找不到匹配的客户时，自动创建新的客户记录
+              </div>
+            </div>
+
+            {/* 第二层：新客户默认阶段选择（仅在启用创建新客户时显示） */}
+            {localData.enable_create_customer && (
+              <div style={{ 
+                paddingLeft: '16px', 
+                borderLeft: '3px solid #3b82f6',
+                backgroundColor: '#f0f9ff',
+                padding: '12px',
+                borderRadius: '8px'
+              }}>
+                <label style={{ fontSize: '13px', fontWeight: '500', color: '#1e40af', marginBottom: '8px', display: 'block' }}>
+                  新客户默认阶段
+                </label>
+                <select
+                  value={localData.default_stage_id || ''}
+                  onChange={(e) => updateNodeData({ default_stage_id: parseInt(e.target.value) || null })}
+                  style={{ 
+                    width: '100%', 
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    border: '1px solid #d1d5db',
+                    fontSize: '13px'
+                  }}
+                >
+                  <option value="">选择阶段...</option>
+                  {(customerStages || []).map((s: any) => (
+                    <option key={s.id} value={String(s.id)}>
+                      {s.name} {s.description ? `(${s.description})` : ''} - ID:{s.id}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ fontSize: '11px', color: '#6366f1', marginTop: '6px' }}>
+                  💡 新创建的客户将自动设置为此阶段，便于后续的 DbTrigger 工作流处理
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* DbTrigger 触发配置 */}
+        <div className="config-field">
+          <div style={{ 
+            padding: '16px', 
+            background: '#f0fdf4', 
+            borderRadius: '12px',
+            border: '1px solid #bbf7d0',
+            marginBottom: '8px'
+          }}>
+            <div style={{ fontSize: '14px', color: '#166534', marginBottom: '12px', fontWeight: '600' }}>
+              🔄 DbTrigger 触发设置
+            </div>
+            
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={localData.enable_db_trigger !== false} // 默认启用
+                  onChange={(e) => updateNodeData({ enable_db_trigger: e.target.checked })}
+                  style={{ marginRight: '8px' }}
+                />
+                <span style={{ fontWeight: '500' }}>启用 DbTrigger 自动触发</span>
+              </label>
+              <div style={{ fontSize: '12px', color: '#15803d', marginTop: '4px', marginLeft: '24px' }}>
+                数据更新完成后，自动检查并触发相关的 DbTrigger 工作流
+              </div>
+            </div>
+
+            {localData.enable_db_trigger !== false && (
+              <div style={{ 
+                paddingLeft: '16px', 
+                borderLeft: '3px solid #22c55e',
+                backgroundColor: '#f0fdf4',
+                padding: '8px',
+                borderRadius: '6px'
+              }}>
+                <div style={{ fontSize: '11px', color: '#15803d' }}>
+                  💡 启用后，当客户数据发生变化时，会立即触发监听相应字段的 DbTrigger 工作流
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* 智能更新说明 */}
         {(localData.update_mode === 'smart_update' || localData.update_mode === 'hybrid') && (
       <div className="config-field">
@@ -2357,8 +2636,8 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             选择当更新过程中遇到错误时的处理方式
           </div>
       </div>
-    </>
-  )
+      </>
+    )
   }
 
   const renderDelayConfig = () => (
@@ -2812,22 +3091,90 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           color: '#64748b',
           fontWeight: '500'
         }}>
-          配置消息模板类型和媒体内容
+          配置消息模板类型和媒体内容，支持智能变量
         </p>
       </div>
 
-
       {/* 媒体选择配置 */}
       <div style={{ marginBottom: '24px' }}>
-        <label style={{
-          display: 'block',
-          marginBottom: '12px',
-          fontSize: '14px',
-          fontWeight: '600',
-          color: '#374151'
-        }}>
-          📎 媒体内容
-        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+          <label style={{
+            fontSize: '14px',
+            fontWeight: '600',
+            color: '#374151'
+          }}>
+            📎 媒体内容
+          </label>
+          {/* 帮助提示图标 */}
+          <div style={{ position: 'relative', display: 'inline-block' }}>
+            <div
+              onClick={() => setShowMediaHelp(!showMediaHelp)}
+              style={{
+                width: '20px',
+                height: '20px',
+                borderRadius: '50%',
+                background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                color: 'white',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'scale(1.1)';
+                e.currentTarget.style.boxShadow = '0 4px 12px rgba(14, 165, 233, 0.3)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'scale(1)';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              ?
+            </div>
+            {/* 帮助提示气泡 */}
+            {showMediaHelp && (
+              <div style={{
+                position: 'absolute',
+                left: '30px',
+                top: '-10px',
+                background: 'white',
+                border: '2px solid #0ea5e9',
+                borderRadius: '12px',
+                padding: '12px 16px',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)',
+                zIndex: 1000,
+                width: '380px',
+                fontSize: '11px',
+                lineHeight: '1.5'
+              }}>
+                <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#0284c7' }}>
+                  📱 媒体发送模式说明
+                </div>
+                <div style={{ color: '#475569' }}>
+                  • <strong>文本和媒体一起发送：</strong>只取第一张照片和第一条文本一起发送<br/>
+                  • <strong>媒体文本配对发送：</strong>媒体1+文本1，媒体2+文本2...<br/>
+                  • <strong>媒体和文本分开发送：</strong>先发送所有媒体，再发送文本
+                </div>
+                <div 
+                  onClick={() => setShowMediaHelp(false)}
+                  style={{
+                    marginTop: '8px',
+                    textAlign: 'right',
+                    color: '#0ea5e9',
+                    cursor: 'pointer',
+                    fontSize: '10px',
+                    fontWeight: '600'
+                  }}
+                >
+                  ✕ 关闭
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
         
         <div style={{ 
           background: 'white',
@@ -3206,23 +3553,367 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               )}
             </div>
           )}
-          
+        </div>
+      </div>
+
+      {/* 智能变量配置面板 - 紧凑版 */}
+      <div style={{ marginBottom: '24px' }}>
+        <div style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          justifyContent: 'space-between',
+          marginBottom: '12px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <label style={{
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151'
+            }}>
+              🔧 智能变量配置
+            </label>
+            {/* 帮助提示图标 */}
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <div
+                onClick={() => setShowSmartVarHelp(!showSmartVarHelp)}
+                style={{
+                  width: '20px',
+                  height: '20px',
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                  color: 'white',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '12px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'scale(1.1)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(14, 165, 233, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'scale(1)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                ?
+              </div>
+              {/* 帮助提示气泡 */}
+              {showSmartVarHelp && (
+                <div style={{
+                  position: 'absolute',
+                  left: '30px',
+                  top: '-10px',
+                  background: 'white',
+                  border: '2px solid #0ea5e9',
+                  borderRadius: '12px',
+                  padding: '12px 16px',
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)',
+                  zIndex: 1000,
+                  width: '320px',
+                  fontSize: '11px',
+                  lineHeight: '1.5'
+                }}>
+                  <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#0284c7' }}>
+                    💡 智能变量使用说明
+                  </div>
+                  <div style={{ color: '#475569' }}>
+                    • 创建变量名，在模板中用 <code style={{background: '#f0f0f0', padding: '1px 4px', borderRadius: '3px'}}>{'{{变量名}}'}</code><br/>
+                    • 支持数据转换：取首词、后4位等<br/>
+                    • 点击 🔗 智能变量 按钮快速插入<br/>
+                    • 示例：<code style={{background: '#f0f0f0', padding: '1px 4px', borderRadius: '3px'}}>{'{{customer_name}}'}</code>
+                  </div>
+                  <div 
+                    onClick={() => setShowSmartVarHelp(false)}
+                    style={{
+                      marginTop: '8px',
+                      textAlign: 'right',
+                      color: '#0ea5e9',
+                      cursor: 'pointer',
+                      fontSize: '10px',
+                      fontWeight: '600'
+                    }}
+                  >
+                    ✕ 关闭
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              const variables = localData.smart_variables || {};
+              const nextKey = `var_${Object.keys(variables).length + 1}`;
+              updateNodeData({ 
+                smart_variables: {
+                  ...variables,
+                  [nextKey]: {
+                    display_name: '',
+                    source: '',
+                    transformer: 'None',
+                    description: ''
+                  }
+                }
+              });
+            }}
+            style={{
+              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+              color: 'white',
+              border: 'none',
+              borderRadius: '8px',
+              padding: '6px 12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              fontWeight: '600',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateY(-1px)';
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(16, 185, 129, 0.3)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateY(0)';
+              e.currentTarget.style.boxShadow = 'none';
+            }}
+          >
+            ➕ 添加变量
+          </button>
+        </div>
+
+        {/* 变量列表 - 紧凑版 */}
+        {Object.keys(localData.smart_variables || {}).length > 0 ? (
+          <div style={{ 
+            maxHeight: '300px',
+            overflow: 'auto',
+            border: '1px solid #e2e8f0',
+            borderRadius: '8px',
+            padding: '8px'
+          }}>
+            {Object.entries(localData.smart_variables || {}).map(([varName, varConfig]: [string, any]) => (
+              <div key={varName} style={{
+                border: '1px solid #e2e8f0',
+                borderRadius: '8px',
+                padding: '10px',
+                marginBottom: '8px',
+                background: 'white',
+                position: 'relative'
+              }}>
+                {/* 紧凑头部 */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '8px' }}>
+                  <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                    <div>
+                      <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>
+                        变量名
+                      </label>
+                      <input
+                        type="text"
+                        value={editingVariableName?.originalName === varName ? editingVariableName.tempName : varName}
+                        onChange={(e) => {
+                          setEditingVariableName({ originalName: varName, tempName: e.target.value });
+                        }}
+                        onBlur={() => {
+                          if (editingVariableName && editingVariableName.originalName === varName && editingVariableName.tempName !== varName) {
+                            const newVariables = { ...localData.smart_variables };
+                            const newName = editingVariableName.tempName;
+                            if (newName && !newVariables[newName]) {
+                              newVariables[newName] = newVariables[varName];
+                              delete newVariables[varName];
+                              updateNodeData({ smart_variables: newVariables });
+                            }
+                          }
+                          setEditingVariableName(null);
+                        }}
+                        onFocus={() => {
+                          setEditingVariableName({ originalName: varName, tempName: varName });
+                        }}
+                        placeholder="var_1"
+                        style={{
+                          width: '100%',
+                          padding: '4px 6px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontFamily: 'monospace'
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>
+                        显示名称
+                      </label>
+                      <input
+                        type="text"
+                        value={varConfig.display_name || ''}
+                        onChange={(e) => {
+                          const newVariables = { ...localData.smart_variables };
+                          newVariables[varName] = { ...newVariables[varName], display_name: e.target.value };
+                          updateNodeData({ smart_variables: newVariables });
+                        }}
+                        placeholder="客户姓名"
+                        style={{
+                          width: '100%',
+                          padding: '4px 6px',
+                          border: '1px solid #d1d5db',
+                          borderRadius: '4px',
+                          fontSize: '11px'
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const newVariables = { ...localData.smart_variables };
+                      delete newVariables[varName];
+                      updateNodeData({ smart_variables: newVariables });
+                    }}
+                    style={{
+                      marginLeft: '8px',
+                      background: '#fee2e2',
+                      color: '#dc2626',
+                      border: 'none',
+                      borderRadius: '4px',
+                      padding: '4px 8px',
+                      fontSize: '10px',
+                      cursor: 'pointer',
+                      fontWeight: '600'
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
+
+                {/* 数据源 */}
+                <div style={{ marginBottom: '8px' }}>
+                  <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>
+                    数据源
+                  </label>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    <input
+                      type="text"
+                      value={varConfig.source || ''}
+                      onChange={(e) => {
+                        const newVariables = { ...localData.smart_variables };
+                        newVariables[varName] = { ...newVariables[varName], source: e.target.value };
+                        updateNodeData({ smart_variables: newVariables });
+                      }}
+                      placeholder="{{trigger.name}}"
+                      style={{
+                        flex: 1,
+                        padding: '4px 6px',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '4px',
+                        fontSize: '11px',
+                        fontFamily: 'monospace'
+                      }}
+                    />
+                    <button
+                      onClick={(e) => {
+                        setShowVariableSelector({ show: true, position: `smart_var_template_${varName}` });
+                        fetchCustomerFields();
+                      }}
+                      style={{
+                        background: '#3b82f6',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        padding: '4px 8px',
+                        fontSize: '10px',
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      @ 选择
+                    </button>
+                  </div>
+                </div>
+
+                {/* 转换和预览 */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div>
+                    <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>
+                      数据转换
+                    </label>
+                    <select
+                      value={varConfig.transformer || 'None'}
+                      onChange={(e) => {
+                        const newVariables = { ...localData.smart_variables };
+                        newVariables[varName] = { ...newVariables[varName], transformer: e.target.value };
+                        updateNodeData({ smart_variables: newVariables });
+                      }}
+                      style={{
+                        width: '100%',
+                        padding: '4px 6px',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '4px',
+                        fontSize: '10px'
+                      }}
+                    >
+                      <option value="None">无转换</option>
+                      <option value="First Word">取首词</option>
+                      <option value="Last Word">取末词</option>
+                      <option value="Last 4 Digits">后4位</option>
+                      <option value="First 4 Digits">前4位</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '10px', color: '#64748b', display: 'block', marginBottom: '2px' }}>
+                      预览
+                    </label>
+                    <div style={{
+                      padding: '4px 6px',
+                      background: '#f8fafc',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '4px',
+                      fontSize: '10px',
+                      fontFamily: 'monospace',
+                      color: '#475569',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {(() => {
+                        const sampleValue = varConfig.source?.includes('name') ? '张三丰' :
+                                          varConfig.source?.includes('phone') ? '13812345678' :
+                                          varConfig.source?.includes('message') ? '你好世界' : '示例';
+                        
+                        let transformedValue = sampleValue;
+                        if (varConfig.transformer === 'First Word') {
+                          transformedValue = sampleValue.split(' ')[0] || sampleValue.charAt(0);
+                        } else if (varConfig.transformer === 'Last Word') {
+                          const words = sampleValue.split(' ');
+                          transformedValue = words[words.length - 1] || sampleValue;
+                        } else if (varConfig.transformer === 'Last 4 Digits') {
+                          transformedValue = sampleValue.slice(-4);
+                        } else if (varConfig.transformer === 'First 4 Digits') {
+                          transformedValue = sampleValue.slice(0, 4);
+                        }
+                        
+                        return varConfig.transformer === 'None' ? 
+                          transformedValue : 
+                          `${sampleValue}→${transformedValue}`;
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
           <div style={{
-            fontSize: '12px',
-            color: '#64748b',
-            marginTop: (localData.media_list && localData.media_list.length > 0) ? '0' : '8px',
-            padding: '8px 12px',
+            padding: '16px',
             background: 'rgba(102, 126, 234, 0.05)',
             borderRadius: '8px',
-            borderLeft: '3px solid #667eea'
+            border: '1px dashed #d1d5db',
+            textAlign: 'center',
+            color: '#64748b',
+            fontSize: '12px'
           }}>
-            💡 <strong>发送模式说明：</strong>
-            <br />• <strong>一起发送（附带说明）：</strong>媒体和文本作为一条消息发送，媒体包含文本说明
-            <br />• <strong>一起发送（无说明）：</strong>媒体和文本作为一条消息发送，媒体不包含文本说明
-            <br />• <strong>分开发送：</strong>先发送媒体文件，再发送文本消息
-            <br />• <strong>分开发送（延迟）：</strong>先发送媒体，延迟后发送文本，模拟真实对话节奏
+            暂无智能变量，点击"➕ 添加变量"开始配置
           </div>
-        </div>
+        )}
       </div>
 
       {/* 多条消息模板 */}
@@ -3233,13 +3924,85 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
           justifyContent: 'space-between',
           marginBottom: '12px'
         }}>
-          <label style={{
-            fontSize: '14px',
-            fontWeight: '600',
-            color: '#374151'
-          }}>
-            📝 消息模板内容
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <label style={{
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151'
+            }}>
+              📝 消息模板内容
+            </label>
+            {/* 帮助提示图标 */}
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <div
+                onClick={() => setShowTemplateHelp(!showTemplateHelp)}
+                style={{
+                  width: '20px',
+                  height: '20px',
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                  color: 'white',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '12px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'scale(1.1)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(14, 165, 233, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'scale(1)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                ?
+              </div>
+              {/* 帮助提示气泡 */}
+              {showTemplateHelp && (
+                <div style={{
+                  position: 'absolute',
+                  left: '30px',
+                  top: '-10px',
+                  background: 'white',
+                  border: '2px solid #0ea5e9',
+                  borderRadius: '12px',
+                  padding: '12px 16px',
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)',
+                  zIndex: 1000,
+                  width: '360px',
+                  fontSize: '11px',
+                  lineHeight: '1.5'
+                }}>
+                  <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#0284c7' }}>
+                    💬 消息模板使用说明
+                  </div>
+                  <div style={{ color: '#475569' }}>
+                    • <strong>多条消息：</strong>支持按顺序发送多条消息<br/>
+                    • <strong>系统变量：</strong> <code style={{background: '#f0f0f0', padding: '1px 4px', borderRadius: '3px'}}>{'{{trigger.name}}'}</code>, <code style={{background: '#f0f0f0', padding: '1px 4px', borderRadius: '3px'}}>{'{{db.customer.phone}}'}</code> 等<br/>
+                    • <strong>智能变量：</strong>使用上方配置的自定义变量（支持数据转换）<br/>
+                    • <strong>快速插入：</strong>点击 @ 变量 或 🔗 智能变量 按钮
+                  </div>
+                  <div 
+                    onClick={() => setShowTemplateHelp(false)}
+                    style={{
+                      marginTop: '8px',
+                      textAlign: 'right',
+                      color: '#0ea5e9',
+                      cursor: 'pointer',
+                      fontSize: '10px',
+                      fontWeight: '600'
+                    }}
+                  >
+                    ✕ 关闭
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
           <button
             onClick={() => {
               const currentMessages = localData.message_templates || [{ id: Date.now(), content: '' }];
@@ -3328,7 +4091,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             
             <div style={{ position: 'relative' }}>
           <textarea
-                value={message.content || ''}
+                value={message.content === undefined ? '' : message.content}
                 onChange={(e) => {
                   const updatedMessages = (localData.message_templates || []).map((msg, i) => 
                     i === index ? { ...msg, content: e.target.value } : msg
@@ -3337,15 +4100,13 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                 }}
                 onKeyDown={(e) => handleInputKeyDown(e, `template_${index}`)}
                 onSelect={(e) => handleInputSelect(e, `template_${index}`)}
-                placeholder={index === 0 ? `您好 {{trigger.name}}！
+                placeholder={`💡 输入消息内容，使用 {{ 获得智能变量提示
 
-我们已经收到您的咨询，客服将在 {{db.customer.response_time || '5分钟'}} 内回复您。` : `这是第 ${index + 1} 条消息...
-
-可以添加更多内容或使用变量 {{trigger.name}}`}
+示例：您好 {{trigger.name}}！我们已收到您的咨询。`}
                 rows={4}
                 style={{
                   width: '100%',
-                  padding: '12px',
+                  padding: '12px 100px 12px 12px',
                   border: '1px solid rgba(148, 163, 184, 0.3)',
                   borderRadius: '8px',
                   fontSize: '14px',
@@ -3368,15 +4129,13 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                   e.currentTarget.style.background = '#fafafa';
                 }}
               />
+              <div style={{ position: 'absolute', right: '8px', top: '8px', display: 'flex', gap: '4px' }}>
             <button
                   onClick={() => {
                   setShowVariableSelector({ show: true, position: `template_${index}` })
                     fetchCustomerFields() // 获取最新的客户字段
                   }}
                 style={{
-                  position: 'absolute',
-                  right: '8px',
-                  top: '8px',
                   background: '#3b82f6',
                   color: 'white',
                   border: 'none',
@@ -3398,21 +4157,39 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               >
                 @ 变量
             </button>
+                {Object.keys(localData.smart_variables || {}).length > 0 && (
+                  <button
+                    onClick={(e) => {
+                      setShowVariableSelector({ show: true, position: `smart_template_${index}` });
+                      fetchCustomerFields();
+                    }}
+                    style={{
+                      background: '#f59e0b',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '6px',
+                      padding: '4px 8px',
+                      fontSize: '11px',
+                      cursor: 'pointer',
+                      fontWeight: '600',
+                      transition: 'all 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = '#d97706';
+                      e.currentTarget.style.transform = 'translateY(-1px)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = '#f59e0b';
+                      e.currentTarget.style.transform = 'translateY(0)';
+                    }}
+                  >
+                    🔗 智能变量
+                  </button>
+                )}
+              </div>
           </div>
         </div>
         ))}
-
-        <div style={{
-          fontSize: '12px',
-          color: '#64748b',
-          marginTop: '8px',
-          padding: '8px 12px',
-          background: 'rgba(102, 126, 234, 0.05)',
-          borderRadius: '8px',
-          borderLeft: '3px solid #667eea'
-        }}>
-          💡 <strong>多消息说明：</strong>支持发送多条消息，按顺序依次发送。每条消息都支持变量: {`{{trigger.name}}`}, {`{{trigger.phone}}`}, {`{{db.customer.name}}`}等
-        </div>
       </div>
       </div>
   )
@@ -3420,140 +4197,545 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
   const renderCustomAPIConfig = () => {
     
     return (
-    <>
+    <div style={{
+      background: 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)',
+      borderRadius: '16px',
+      padding: '24px',
+      border: '1px solid rgba(148, 163, 184, 0.2)',
+      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.05)'
+    }}>
+      {/* 标题区域 */}
+      <div style={{
+        marginBottom: '24px',
+        paddingBottom: '16px',
+        borderBottom: '2px solid rgba(102, 126, 234, 0.1)'
+      }}>
+        <h3 style={{
+          margin: 0,
+          fontSize: '20px',
+          fontWeight: '600',
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          WebkitBackgroundClip: 'text',
+          WebkitTextFillColor: 'transparent',
+          backgroundClip: 'text'
+        }}>
+          🔌 自定义 API 配置
+        </h3>
+        <p style={{
+          margin: '8px 0 0 0',
+          fontSize: '14px',
+          color: '#64748b',
+          fontWeight: '500'
+        }}>
+          配置外部 API 调用和数据处理
+        </p>
+      </div>
+
       {/* 基础配置 */}
-      <div className="config-field">
-        <label>API 名称</label>
-        <input
-          type="text"
-          value={localData.name || ''}
-          onChange={(e) => updateNodeData({ name: e.target.value })}
-          placeholder="例如：获取天气信息、发送邮件通知"
-        />
-        <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-          给这个API调用起个容易识别的名字
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>请求方法</label>
-        <select
-          value={localData.method || 'GET'}
-          onChange={(e) => updateNodeData({ method: e.target.value })}
-        >
-          <option value="GET">🔍 GET - 获取数据</option>
-          <option value="POST">📤 POST - 发送数据</option>
-          <option value="PUT">✏️ PUT - 更新数据</option>
-          <option value="DELETE">🗑️ DELETE - 删除数据</option>
-        </select>
-      </div>
-
-      <div className="config-field">
-        <label>API 地址</label>
-          <input
-            type="text"
-            value={localData.url || ''}
-            onChange={(e) => updateNodeData({ url: e.target.value })}
-          placeholder="https://api.example.com/endpoint"
-        />
-      </div>
-
-      {/* 认证配置 */}
-      <div className="config-field">
-        <label>认证方式</label>
-        <select
-          value={localData.auth?.type || 'none'}
-          onChange={(e) => updateNodeData({ 
-            auth: { ...localData.auth, type: e.target.value }
-          })}
-        >
-          <option value="none">🚫 无需认证</option>
-          <option value="bearer">🔑 Bearer Token</option>
-          <option value="api_key">🗝️ API Key</option>
-          <option value="basic">👤 Basic Auth</option>
-        </select>
-      </div>
-
-      {/* 根据认证方式显示对应配置 */}
-      {localData.auth?.type === 'bearer' && (
-        <div className="config-field">
-          <label>Bearer Token</label>
-          <input
-            type="password"
-            value={localData.auth?.token || ''}
-            onChange={(e) => updateNodeData({ 
-              auth: { ...localData.auth, token: e.target.value }
-            })}
-            placeholder="输入你的 Bearer Token"
-          />
-        </div>
-      )}
-
-      {localData.auth?.type === 'api_key' && (
-        <>
-          <div className="config-field">
-            <label>API Key</label>
-            <input
-              type="password"
-              value={localData.auth?.api_key || ''}
-              onChange={(e) => updateNodeData({ 
-                auth: { ...localData.auth, api_key: e.target.value }
-              })}
-              placeholder="输入你的 API Key"
-            />
-          </div>
-          <div className="config-field">
-            <label>API Key Header 名称</label>
+      <div style={{ marginBottom: '24px' }}>
+        <div style={{ 
+          background: 'white',
+          borderRadius: '12px',
+          padding: '16px',
+          border: '1px solid rgba(148, 163, 184, 0.15)'
+        }}>
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{
+              display: 'block',
+              marginBottom: '8px',
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151'
+            }}>
+              API 名称
+            </label>
             <input
               type="text"
-              value={localData.auth?.api_key_header || 'X-API-Key'}
-              onChange={(e) => updateNodeData({ 
-                auth: { ...localData.auth, api_key_header: e.target.value }
-              })}
-              placeholder="X-API-Key"
+              value={localData.name || ''}
+              onChange={(e) => updateNodeData({ name: e.target.value })}
+              placeholder="例如：获取天气信息、发送邮件通知"
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                border: '1px solid #d1d5db',
+                borderRadius: '8px',
+                fontSize: '14px',
+                background: 'white',
+                outline: 'none',
+                transition: 'all 0.2s ease',
+                boxSizing: 'border-box'
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = '#667eea';
+                e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = '#d1d5db';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
             />
           </div>
-        </>
-      )}
 
-      {localData.auth?.type === 'basic' && (
-        <>
-          <div className="config-field">
-            <label>用户名</label>
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{
+              display: 'block',
+              marginBottom: '8px',
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151'
+            }}>
+              请求方法
+            </label>
+            <select
+              value={localData.method || 'GET'}
+              onChange={(e) => updateNodeData({ method: e.target.value })}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                border: '1px solid #d1d5db',
+                borderRadius: '8px',
+                fontSize: '14px',
+                background: 'white',
+                outline: 'none',
+                transition: 'all 0.2s ease',
+                cursor: 'pointer'
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = '#667eea';
+                e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = '#d1d5db';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              <option value="GET">🔍 GET - 获取数据</option>
+              <option value="POST">📤 POST - 发送数据</option>
+              <option value="PUT">✏️ PUT - 更新数据</option>
+              <option value="DELETE">🗑️ DELETE - 删除数据</option>
+            </select>
+          </div>
+
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{
+              display: 'block',
+              marginBottom: '8px',
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151'
+            }}>
+              API 地址
+            </label>
             <input
               type="text"
-              value={localData.auth?.username || ''}
-              onChange={(e) => updateNodeData({ 
-                auth: { ...localData.auth, username: e.target.value }
-              })}
-              placeholder="输入用户名"
+              value={localData.url || ''}
+              onChange={(e) => updateNodeData({ url: e.target.value })}
+              placeholder="https://api.example.com/endpoint"
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                border: '1px solid #d1d5db',
+                borderRadius: '8px',
+                fontSize: '14px',
+                background: 'white',
+                outline: 'none',
+                transition: 'all 0.2s ease',
+                boxSizing: 'border-box'
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = '#667eea';
+                e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = '#d1d5db';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
             />
           </div>
-          <div className="config-field">
-            <label>密码</label>
-            <input
-              type="password"
-              value={localData.auth?.password || ''}
+
+          {/* 认证配置 */}
+          <div style={{ marginBottom: localData.auth?.type && localData.auth?.type !== 'none' ? '16px' : '0' }}>
+            <label style={{
+              display: 'block',
+              marginBottom: '8px',
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151'
+            }}>
+              认证方式
+            </label>
+            <select
+              value={localData.auth?.type || 'none'}
               onChange={(e) => updateNodeData({ 
-                auth: { ...localData.auth, password: e.target.value }
+                auth: { ...localData.auth, type: e.target.value }
               })}
-              placeholder="输入密码"
-            />
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                border: '1px solid #d1d5db',
+                borderRadius: '8px',
+                fontSize: '14px',
+                background: 'white',
+                outline: 'none',
+                transition: 'all 0.2s ease',
+                cursor: 'pointer'
+              }}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = '#667eea';
+                e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = '#d1d5db';
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              <option value="none">🚫 无需认证</option>
+              <option value="bearer">🔑 Bearer Token</option>
+              <option value="api_key">🗝️ API Key</option>
+              <option value="basic">👤 Basic Auth</option>
+            </select>
           </div>
-        </>
-      )}
+
+          {/* 根据认证方式显示对应配置 */}
+          {localData.auth?.type === 'bearer' && (
+            <div style={{ marginTop: '16px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                Bearer Token
+              </label>
+              <input
+                type="password"
+                value={localData.auth?.token || ''}
+                onChange={(e) => updateNodeData({ 
+                  auth: { ...localData.auth, token: e.target.value }
+                })}
+                placeholder="输入你的 Bearer Token"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  background: 'white',
+                  outline: 'none',
+                  transition: 'all 0.2s ease',
+                  boxSizing: 'border-box'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = '#d1d5db';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              />
+            </div>
+          )}
+
+          {localData.auth?.type === 'api_key' && (
+            <>
+              <div style={{ marginTop: '16px' }}>
+                <label style={{
+                  display: 'block',
+                  marginBottom: '8px',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  color: '#374151'
+                }}>
+                  API Key
+                </label>
+                <input
+                  type="password"
+                  value={localData.auth?.api_key || ''}
+                  onChange={(e) => updateNodeData({ 
+                    auth: { ...localData.auth, api_key: e.target.value }
+                  })}
+                  placeholder="输入你的 API Key"
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    background: 'white',
+                    outline: 'none',
+                    transition: 'all 0.2s ease',
+                    boxSizing: 'border-box'
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.borderColor = '#667eea';
+                    e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = '#d1d5db';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                />
+              </div>
+              <div style={{ marginTop: '16px' }}>
+                <label style={{
+                  display: 'block',
+                  marginBottom: '8px',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  color: '#374151'
+                }}>
+                  API Key Header 名称
+                </label>
+                <input
+                  type="text"
+                  value={localData.auth?.api_key_header || 'X-API-Key'}
+                  onChange={(e) => updateNodeData({ 
+                    auth: { ...localData.auth, api_key_header: e.target.value }
+                  })}
+                  placeholder="X-API-Key"
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    background: 'white',
+                    outline: 'none',
+                    transition: 'all 0.2s ease',
+                    boxSizing: 'border-box'
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.borderColor = '#667eea';
+                    e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = '#d1d5db';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                />
+              </div>
+            </>
+          )}
+
+          {localData.auth?.type === 'basic' && (
+            <>
+              <div style={{ marginTop: '16px' }}>
+                <label style={{
+                  display: 'block',
+                  marginBottom: '8px',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  color: '#374151'
+                }}>
+                  用户名
+                </label>
+                <input
+                  type="text"
+                  value={localData.auth?.username || ''}
+                  onChange={(e) => updateNodeData({ 
+                    auth: { ...localData.auth, username: e.target.value }
+                  })}
+                  placeholder="输入用户名"
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    background: 'white',
+                    outline: 'none',
+                    transition: 'all 0.2s ease',
+                    boxSizing: 'border-box'
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.borderColor = '#667eea';
+                    e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = '#d1d5db';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                />
+              </div>
+              <div style={{ marginTop: '16px' }}>
+                <label style={{
+                  display: 'block',
+                  marginBottom: '8px',
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  color: '#374151'
+                }}>
+                  密码
+                </label>
+                <input
+                  type="password"
+                  value={localData.auth?.password || ''}
+                  onChange={(e) => updateNodeData({ 
+                    auth: { ...localData.auth, password: e.target.value }
+                  })}
+                  placeholder="输入密码"
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '8px',
+                    fontSize: '14px',
+                    background: 'white',
+                    outline: 'none',
+                    transition: 'all 0.2s ease',
+                    boxSizing: 'border-box'
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.borderColor = '#667eea';
+                    e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = '#d1d5db';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
 
       {/* 请求体配置（仅POST/PUT显示） */}
       {(localData.method === 'POST' || localData.method === 'PUT') && (
         <>
           {/* 智能变量配置面板 */}
-        <div className="config-field">
-            <label>🔧 智能变量配置</label>
-            <div style={{ fontSize: '12px', color: '#666', marginBottom: '16px', lineHeight: '1.5' }}>
-              <strong>💡 配置说明：</strong><br/>
-              • 创建有意义的变量名，在请求体中使用 <code style={{background: '#f0f0f0', padding: '2px 4px', borderRadius: '3px'}}>{'{{变量名}}'}</code><br/>
-              • 支持数据转换（取首词、后4位等）和实时预览<br/>
-              • 变量会自动在请求体编辑器中提供智能提示
+          <div style={{ 
+            background: 'white',
+            borderRadius: '12px',
+            padding: '16px',
+            border: '1px solid rgba(148, 163, 184, 0.15)',
+            marginBottom: '16px'
+          }}>
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'space-between',
+              marginBottom: '12px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{
+                  fontSize: '14px',
+                  fontWeight: '600',
+                  color: '#374151'
+                }}>
+                  🔧 智能变量配置
+                </label>
+                {/* 帮助提示图标 */}
+                <div style={{ position: 'relative', display: 'inline-block' }}>
+                  <div
+                    onClick={() => setShowApiSmartVarHelp(!showApiSmartVarHelp)}
+                    style={{
+                      width: '20px',
+                      height: '20px',
+                      borderRadius: '50%',
+                      background: 'linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%)',
+                      color: 'white',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '12px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease'
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'scale(1.1)';
+                      e.currentTarget.style.boxShadow = '0 4px 12px rgba(14, 165, 233, 0.3)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'scale(1)';
+                      e.currentTarget.style.boxShadow = 'none';
+                    }}
+                  >
+                    ?
+                  </div>
+                  {/* 帮助提示气泡 */}
+                  {showApiSmartVarHelp && (
+                    <div style={{
+                      position: 'absolute',
+                      left: '30px',
+                      top: '-10px',
+                      background: 'white',
+                      border: '2px solid #0ea5e9',
+                      borderRadius: '12px',
+                      padding: '12px 16px',
+                      boxShadow: '0 8px 24px rgba(0, 0, 0, 0.15)',
+                      zIndex: 1000,
+                      width: '320px',
+                      fontSize: '11px',
+                      lineHeight: '1.5'
+                    }}>
+                      <div style={{ fontWeight: 'bold', marginBottom: '8px', color: '#0284c7' }}>
+                        💡 智能变量使用说明
+                      </div>
+                      <div style={{ color: '#475569' }}>
+                        • 创建变量名，在请求体中用 <code style={{background: '#f0f0f0', padding: '1px 4px', borderRadius: '3px'}}>{'{{变量名}}'}</code><br/>
+                        • 支持数据转换：取首词、后4位等<br/>
+                        • 输入 <code style={{background: '#f0f0f0', padding: '1px 4px', borderRadius: '3px'}}>{'{{{'}</code> 获得智能提示<br/>
+                        • 变量会自动在请求体中可用
+                      </div>
+                      <div 
+                        onClick={() => setShowApiSmartVarHelp(false)}
+                        style={{
+                          marginTop: '8px',
+                          textAlign: 'right',
+                          color: '#0ea5e9',
+                          cursor: 'pointer',
+                          fontSize: '10px',
+                          fontWeight: '600'
+                        }}
+                      >
+                        ✕ 关闭
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  const variables = localData.smart_variables || {};
+                  const nextKey = `var_${Object.keys(variables).length + 1}`;
+                  updateNodeData({ 
+                    smart_variables: {
+                      ...variables,
+                      [nextKey]: {
+                        displayName: '',
+                        source: '',
+                        transformer: 'None',
+                        description: ''
+                      }
+                    }
+                  });
+                }}
+                style={{
+                  background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  fontWeight: '600',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(16, 185, 129, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                ➕ 添加变量
+              </button>
             </div>
             
             {/* 变量列表 */}
@@ -3682,28 +4864,10 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                   </div>
 
                   <div style={{ marginBottom: '12px' }}>
-                    <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
-                      🔗 数据源
-                    </label>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      <input
-                        type="text"
-                        value={varConfig.source || ''}
-                        onChange={(e) => {
-                          const newVariables = { ...localData.smart_variables };
-                          newVariables[varName] = { ...newVariables[varName], source: e.target.value };
-                          updateNodeData({ smart_variables: newVariables });
-                        }}
-                        placeholder="例如: {{trigger.name}} 或 {{db.customer.phone}}"
-                        style={{
-                          flex: 1,
-                          padding: '8px 12px',
-                          border: '1px solid #d1d5db',
-                          borderRadius: '6px',
-                          fontSize: '13px',
-                          fontFamily: 'monospace'
-                        }}
-                      />
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600' }}>
+                        🔗 数据源
+                      </label>
                       <button
                         onClick={(e) => {
                           setShowVariableSelector({ show: true, position: `smart_var_${varName}` });
@@ -3714,56 +4878,79 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                           color: 'white',
                           border: 'none',
                           borderRadius: '6px',
-                          padding: '8px 12px',
-                          fontSize: '12px',
+                          padding: '4px 10px',
+                          fontSize: '11px',
                           cursor: 'pointer',
-                          whiteSpace: 'nowrap'
+                          whiteSpace: 'nowrap',
+                          fontWeight: '600'
                         }}
                       >
                         @ 选择
                       </button>
                     </div>
+                    <input
+                      type="text"
+                      value={varConfig.source || ''}
+                      onChange={(e) => {
+                        const newVariables = { ...localData.smart_variables };
+                        newVariables[varName] = { ...newVariables[varName], source: e.target.value };
+                        updateNodeData({ smart_variables: newVariables });
+                      }}
+                      placeholder="例如: {{trigger.name}} 或 {{db.customer.phone}}"
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '6px',
+                        fontSize: '13px',
+                        fontFamily: 'monospace',
+                        boxSizing: 'border-box'
+                      }}
+                    />
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                    <div>
-                      <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
-                        🔄 数据转换
-                      </label>
-                      <select
-                        value={varConfig.transformer || 'None'}
-                        onChange={(e) => {
-                          const newVariables = { ...localData.smart_variables };
-                          newVariables[varName] = { ...newVariables[varName], transformer: e.target.value };
-                          updateNodeData({ smart_variables: newVariables });
-                        }}
-                        style={{
-                          width: '100%',
-                          padding: '8px 12px',
-                          border: '1px solid #d1d5db',
-                          borderRadius: '6px',
-                          fontSize: '12px'
-                        }}
-                      >
-                        <option value="None">无转换</option>
-                        <option value="First Word">取首词</option>
-                        <option value="Last Word">取末词</option>
-                        <option value="Last 4 Digits">取后4位</option>
-                        <option value="First 4 Digits">取前4位</option>
-                      </select>
-                    </div>
-                    <div>
+                  <div style={{ marginBottom: '12px' }}>
+                    <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
+                      🔄 数据转换
+                    </label>
+                    <select
+                      value={varConfig.transformer || 'None'}
+                      onChange={(e) => {
+                        const newVariables = { ...localData.smart_variables };
+                        newVariables[varName] = { ...newVariables[varName], transformer: e.target.value };
+                        updateNodeData({ smart_variables: newVariables });
+                      }}
+                      style={{
+                        width: '100%',
+                        padding: '8px 12px',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '6px',
+                        fontSize: '12px',
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      <option value="None">无转换</option>
+                      <option value="First Word">取首词</option>
+                      <option value="Last Word">取末词</option>
+                      <option value="Last 4 Digits">取后4位</option>
+                      <option value="First 4 Digits">取前4位</option>
+                    </select>
+                  </div>
+
+                  {varConfig.transformer && varConfig.transformer !== 'None' && (
+                    <div style={{ marginBottom: '12px' }}>
                       <label style={{ fontSize: '12px', color: '#374151', fontWeight: '600', display: 'block', marginBottom: '4px' }}>
                         📊 预览效果
                       </label>
                       <div style={{
                         padding: '8px 12px',
-                        background: '#f8fafc',
-                        border: '1px solid #e2e8f0',
+                        background: '#f0f9ff',
+                        border: '1px solid #0ea5e9',
                         borderRadius: '6px',
                         fontSize: '12px',
                         fontFamily: 'monospace',
-                        color: '#475569'
+                        color: '#0369a1',
+                        wordBreak: 'break-all'
                       }}>
                         {(() => {
                           const sampleValue = varConfig.source?.includes('name') ? '张三丰' :
@@ -3782,79 +4969,75 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                             transformedValue = sampleValue.slice(0, 4);
                           }
                           
-                          return varConfig.transformer === 'None' ? 
-                            transformedValue : 
-                            `"${sampleValue}" → "${transformedValue}"`;
+                          return `"${sampleValue}" → "${transformedValue}"`;
                         })()}
                       </div>
                     </div>
-                  </div>
+                  )}
                 </div>
               ))}
             </div>
 
-            {/* 添加变量按钮 */}
-            <button
-              onClick={() => {
-                const variables = localData.smart_variables || {};
-                const nextKey = `var_${Object.keys(variables).length + 1}`;
-                updateNodeData({ 
-                  smart_variables: {
-                    ...variables,
-                    [nextKey]: {
-                      displayName: '',
-                      source: '',
-                      transformer: 'None',
-                      description: ''
-                    }
-                  }
-                });
-              }}
-              style={{
-                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                color: 'white',
-                border: 'none',
-                borderRadius: '12px',
-                padding: '12px 24px',
-                fontSize: '14px',
-                cursor: 'pointer',
-                fontWeight: '600',
-                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.25)',
-                transition: 'all 0.2s ease'
-              }}
-            >
-              ➕ 添加新变量
-            </button>
-
-            {/* 使用说明 */}
-            <div style={{ 
-              fontSize: '12px', 
-              color: '#666', 
-              marginTop: '16px', 
-              padding: '16px', 
-              background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)', 
-              borderRadius: '12px',
-              border: '1px solid #0ea5e9'
-            }}>
-              <strong>💡 使用方法：</strong><br/>
-              <div style={{ marginTop: '8px', fontFamily: 'monospace', fontSize: '11px', lineHeight: '1.6' }}>
-                <strong>1. 在请求体中引用变量：</strong><br/>
-                • 使用 <code style={{background: '#fff', padding: '2px 4px', borderRadius: '3px'}}>{'{{变量名}}'}</code> 格式<br/>
-                • 例如：<code style={{background: '#fff', padding: '2px 4px', borderRadius: '3px'}}>{'{{customer_name}}'}</code><br/><br/>
-                
-                <strong>2. 智能提示：</strong><br/>
-                • 在请求体中输入 <code style={{background: '#fff', padding: '2px 4px', borderRadius: '3px'}}>{'{{{'}</code> 会自动显示可用变量<br/>
-                • 支持变量名搜索和自动补全
+            {/* 空状态提示 */}
+            {Object.keys(localData.smart_variables || {}).length === 0 && (
+              <div style={{ 
+                textAlign: 'center', 
+                color: '#9ca3af', 
+                padding: '24px',
+                fontStyle: 'italic',
+                fontSize: '13px',
+                background: '#f9fafb',
+                borderRadius: '8px',
+                border: '1px dashed #d1d5db'
+              }}>
+                暂无智能变量，点击上方"添加变量"开始配置
               </div>
-            </div>
+            )}
           </div>
 
           {/* 请求体配置 */}
-          <div className="config-field">
-            <label>📝 请求体配置</label>
+          <div style={{ 
+            background: 'white',
+            borderRadius: '12px',
+            padding: '16px',
+            border: '1px solid rgba(148, 163, 184, 0.15)',
+            marginTop: '16px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+              <label style={{
+                fontSize: '14px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                📝 请求体配置
+              </label>
+              <button
+                onClick={(e) => openVariableSelector(e, 'body')}
+                style={{
+                  background: '#3b82f6',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '6px 12px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                  fontWeight: '600',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = '#2563eb';
+                  e.currentTarget.style.transform = 'translateY(-1px)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = '#3b82f6';
+                  e.currentTarget.style.transform = 'translateY(0)';
+                }}
+              >
+                @ 变量
+              </button>
+            </div>
             
-            {/* 请求体编辑器 - 全宽度 */}
-            <div style={{ position: 'relative', marginBottom: '16px' }}>
+            {/* 请求体编辑器 */}
             <textarea
               ref={(el) => { if (el) inputRefs.current['body'] = el; }}
               value={localData.body || ''}
@@ -3868,135 +5051,56 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
 }
 
 💡 输入 {{ 获得智能提示`}
-                    style={{ 
-                      fontFamily: 'monospace', 
-                      fontSize: '13px',
-                      minHeight: '200px',
-                      width: '100%',
-                  padding: '12px 50px 12px 12px',
-                      border: '2px solid #e2e8f0',
-                      borderRadius: '8px',
-                  resize: 'vertical',
-                  boxSizing: 'border-box'
-                    }}
-            />
-              <div style={{ position: 'absolute', right: '8px', top: '8px', display: 'flex', gap: '4px' }}>
-            <button
-              onClick={(e) => openVariableSelector(e, 'body')}
-              style={{
-                background: '#3b82f6',
-                color: 'white',
-                border: 'none',
-                      borderRadius: '6px',
-                      padding: '6px 12px',
-                fontSize: '12px',
-                cursor: 'pointer'
-              }}
-            >
-                    @ 变量
-            </button>
-                {Object.keys(localData.smart_variables || {}).length > 0 && (
-                  <button
-                    onClick={(e) => openVariableSelector(e, 'smart_body')}
-                    style={{
-                      background: '#f59e0b',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '6px',
-                      padding: '6px 12px',
-                      fontSize: '12px',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    🔗 智能变量
-                  </button>
-                )}
-          </div>
-          </div>
-
-            {/* 变量面板 - 全宽度 */}
-              <div style={{
-                background: '#f8fafc',
-                border: '1px solid #e2e8f0',
+              style={{ 
+                fontFamily: 'monospace', 
+                fontSize: '13px',
+                minHeight: '200px',
+                width: '100%',
+                padding: '12px',
+                border: '2px solid #e2e8f0',
                 borderRadius: '8px',
-              padding: '16px'
-              }}>
-                <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#374151' }}>
-                  💡 可用变量
-                </h4>
-              
-              {/* 自定义变量部分 */}
-              {Object.keys(localData.smart_variables || {}).length > 0 && (
-                <div style={{ marginBottom: '16px' }}>
-                      <div style={{ marginBottom: '12px' }}>
-                    <strong style={{ color: '#059669', fontSize: '13px' }}>🔧 自定义变量：</strong>
-                      </div>
-                  <div style={{ 
-                    display: 'grid', 
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
-                    gap: '8px' 
-                  }}>
-                      {Object.entries(localData.smart_variables || {}).map(([varName, varConfig]: [string, any]) => (
-                        <div key={varName} style={{ 
-                        padding: '8px 12px',
-                          background: 'white',
-                          borderRadius: '6px',
-                          border: '1px solid #e5e7eb'
-                        }}>
-                        <div style={{ 
-                          fontFamily: 'monospace', 
-                          fontWeight: '600', 
-                          color: '#1e293b',
-                          fontSize: '12px'
-                        }}>
-                            {'{{' + varName + '}}'}
-                          </div>
-                        <div style={{ color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
-                            {varConfig.displayName || '未命名变量'}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                    </div>
-                  )}
-                  
-              {/* 系统变量部分 */}
-              <div>
-                  <div style={{ marginBottom: '8px' }}>
-                  <strong style={{ color: '#3b82f6', fontSize: '13px' }}>🎯 系统变量：</strong>
-                  </div>
-                <div style={{ 
-                  display: 'grid', 
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', 
-                  gap: '6px',
-                  fontSize: '11px', 
-                  color: '#64748b' 
-                }}>
-                  <div>• {'{{trigger.name}}'} - 发送者姓名</div>
-                  <div>• {'{{trigger.phone}}'} - 发送者电话</div>
-                  <div>• {'{{trigger.message}}'} - 消息内容</div>
-                  <div>• {'{{db.customer.name}}'} - 客户姓名</div>
-                  <div>• {'{{db.customer.phone}}'} - 客户电话</div>
-                  <div>• 更多变量请点击 "@ 变量" 查看</div>
-                  </div>
-                </div>
-              
-              {Object.keys(localData.smart_variables || {}).length === 0 && (
-                <div style={{ 
-                  textAlign: 'center', 
-                  color: '#9ca3af', 
-                  padding: '16px',
-                  fontStyle: 'italic',
-                  fontSize: '12px',
-                  marginTop: '12px',
-                  background: 'white',
-                  borderRadius: '6px',
-                  border: '1px dashed #d1d5db'
-                }}>
-                  暂无自定义变量，点击上方"添加新变量"开始配置
+                resize: 'vertical',
+                boxSizing: 'border-box',
+                marginBottom: '12px'
+              }}
+            />
+
+            {/* 智能变量快捷按钮 */}
+            {Object.keys(localData.smart_variables || {}).length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '500' }}>
+                  💡 快速插入：
+                </span>
+                <button
+                  onClick={(e) => openVariableSelector(e, 'smart_body')}
+                  style={{
+                    background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    padding: '6px 12px',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                    fontWeight: '600',
+                    transition: 'all 0.2s ease',
+                    boxShadow: '0 2px 4px rgba(245, 158, 11, 0.3)'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-1px)';
+                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(245, 158, 11, 0.4)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(245, 158, 11, 0.3)';
+                  }}
+                >
+                  🔗 智能变量
+                </button>
+                <span style={{ fontSize: '11px', color: '#9ca3af' }}>
+                  （已配置 {Object.keys(localData.smart_variables || {}).length} 个变量）
+                </span>
               </div>
-              )}
-            </div>
+            )}
           </div>
         </>
       )}
@@ -4005,94 +5109,219 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
       {(localData.method !== 'POST' && localData.method !== 'PUT') && (
         <div style={{ 
           padding: '16px', 
-          background: '#f8fafc', 
-          borderRadius: '8px',
-          border: '1px solid #e2e8f0',
+          background: 'white',
+          borderRadius: '12px',
+          border: '1px solid rgba(148, 163, 184, 0.15)',
           textAlign: 'center',
-          color: '#64748b'
+          color: '#64748b',
+          marginBottom: '16px'
         }}>
           💡 GET 和 DELETE 请求不需要配置请求体
         </div>
       )}
 
       {/* 高级配置 */}
-      <div className="config-field">
-        <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <div style={{ 
+        background: 'white',
+        borderRadius: '12px',
+        padding: '16px',
+        border: '1px solid rgba(148, 163, 184, 0.15)',
+        marginBottom: '16px'
+      }}>
+        <label style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '8px',
+          fontSize: '14px',
+          fontWeight: '600',
+          color: '#374151',
+          cursor: 'pointer'
+        }}>
           <input
             type="checkbox"
             checked={showAdvancedApiConfig}
             onChange={(e) => setShowAdvancedApiConfig(e.target.checked)}
+            style={{ cursor: 'pointer' }}
           />
-          显示高级配置
+          🔧 显示高级配置
         </label>
-      </div>
 
-      {showAdvancedApiConfig && (
-        <>
-          <div className="config-field">
-            <label>超时时间 (秒)</label>
-            <input
-              type="number"
-              value={localData.timeout || 30}
-              onChange={(e) => updateNodeData({ timeout: parseInt(e.target.value) })}
-              min="5"
-              max="300"
-            />
-          </div>
+        {showAdvancedApiConfig && (
+          <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid rgba(148, 163, 184, 0.15)' }}>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                ⏱️ 超时时间 (秒)
+              </label>
+              <input
+                type="number"
+                value={localData.timeout || 30}
+                onChange={(e) => updateNodeData({ timeout: parseInt(e.target.value) })}
+                min="5"
+                max="300"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  background: 'white',
+                  outline: 'none',
+                  transition: 'all 0.2s ease',
+                  boxSizing: 'border-box'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = '#d1d5db';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              />
+            </div>
 
-          <div className="config-field">
-            <label>重试次数</label>
-            <input
-              type="number"
-              value={localData.retry_count || 3}
-              onChange={(e) => updateNodeData({ retry_count: parseInt(e.target.value) })}
-              min="0"
-              max="5"
-            />
-          </div>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                🔄 重试次数
+              </label>
+              <input
+                type="number"
+                value={localData.retry_count || 3}
+                onChange={(e) => updateNodeData({ retry_count: parseInt(e.target.value) })}
+                min="0"
+                max="5"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  background: 'white',
+                  outline: 'none',
+                  transition: 'all 0.2s ease',
+                  boxSizing: 'border-box'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = '#d1d5db';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              />
+            </div>
 
-          <div className="config-field">
-            <label>自定义请求头</label>
-            <textarea
-              value={localData.headers ? JSON.stringify(localData.headers, null, 2) : ''}
-              onChange={(e) => {
-                try {
-                  const headers = JSON.parse(e.target.value || '{}')
-                  updateNodeData({ headers })
-                } catch (err) {
-                  // 忽略JSON解析错误，用户还在输入
-                }
-              }}
-              placeholder={`{
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                📋 自定义请求头
+              </label>
+              <textarea
+                value={localData.headers ? JSON.stringify(localData.headers, null, 2) : ''}
+                onChange={(e) => {
+                  try {
+                    const headers = JSON.parse(e.target.value || '{}')
+                    updateNodeData({ headers })
+                  } catch (err) {
+                    // 忽略JSON解析错误，用户还在输入
+                  }
+                }}
+                placeholder={`{
   "Content-Type": "application/json",
   "X-User-ID": "{{trigger.user_id}}",
   "X-Customer-Phone": "{{trigger.phone}}"
 }`}
-              rows={4}
-              style={{ fontFamily: 'monospace', fontSize: '13px' }}
-            />
-          </div>
+                rows={4}
+                style={{ 
+                  fontFamily: 'monospace', 
+                  fontSize: '13px',
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '8px',
+                  background: 'white',
+                  outline: 'none',
+                  transition: 'all 0.2s ease',
+                  boxSizing: 'border-box',
+                  resize: 'vertical'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = '#d1d5db';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              />
+            </div>
 
-          <div className="config-field">
-            <label>响应数据提取</label>
-            <input
-              type="text"
-              value={localData.response_mapping?.data_field || ''}
-              onChange={(e) => updateNodeData({ 
-                response_mapping: { 
-                  ...localData.response_mapping, 
-                  data_field: e.target.value 
-                }
-              })}
-              placeholder="data.result (提取响应中的特定字段)"
-            />
-            <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-              留空则保存完整响应，填写字段路径可提取特定数据
+            <div>
+              <label style={{
+                display: 'block',
+                marginBottom: '8px',
+                fontSize: '13px',
+                fontWeight: '600',
+                color: '#374151'
+              }}>
+                📊 响应数据提取
+              </label>
+              <input
+                type="text"
+                value={localData.response_mapping?.data_field || ''}
+                onChange={(e) => updateNodeData({ 
+                  response_mapping: { 
+                    ...localData.response_mapping, 
+                    data_field: e.target.value 
+                  }
+                })}
+                placeholder="data.result (提取响应中的特定字段)"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '8px',
+                  fontSize: '14px',
+                  background: 'white',
+                  outline: 'none',
+                  transition: 'all 0.2s ease',
+                  boxSizing: 'border-box'
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = '#667eea';
+                  e.currentTarget.style.boxShadow = '0 0 0 2px rgba(102, 126, 234, 0.1)';
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = '#d1d5db';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              />
+              <div style={{ fontSize: '12px', color: '#64748b', marginTop: '6px' }}>
+                💡 留空则保存完整响应，填写字段路径可提取特定数据
+              </div>
             </div>
           </div>
-        </>
-      )}
-    </>
+        )}
+      </div>
+    </div>
     )
   }
 
@@ -4157,9 +5386,35 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
     const getFieldType = (field: string) => {
       if (!field) return 'text'
       if (field.includes('custom_fields.')) return 'custom'
-      if (['budget_min', 'budget_max', 'unread_count', 'user_id', 'stage_id'].includes(field.split('.').pop() || '')) return 'number'
-      if (['move_in_date', 'updated_at', 'last_timestamp', 'last_follow_up_time'].includes(field.split('.').pop() || '')) return 'date'
+      const fieldName = field.split('.').pop() || ''
+      if (['budget_min', 'budget_max', 'unread_count', 'user_id', 'stage_id', 'version'].includes(fieldName)) return 'number'
+      if (['move_in_date', 'updated_at', 'last_timestamp', 'last_follow_up_time', 'created_at'].includes(fieldName)) return 'date'
+      if (['is_archived'].includes(fieldName)) return 'boolean'
       return 'text'
+    }
+    
+    // 获取字段的友好名称
+    const getFieldDisplayName = (field: string) => {
+      const fieldMap: { [key: string]: string } = {
+        'db.customer.name': '客户姓名',
+        'db.customer.phone': '电话号码',
+        'db.customer.telegram_chat_id': 'Telegram Chat ID',
+        'db.customer.email': '邮箱',
+        'db.customer.status': '状态',
+        'db.customer.stage_id': '阶段',
+        'db.customer.unread_count': '未读消息数',
+        'db.customer.move_in_date': '搬入日期',
+        'db.customer.updated_at': '更新时间',
+        'db.customer.created_at': '创建时间',
+        'db.customer.last_timestamp': '最后消息时间',
+        'db.customer.last_follow_up_time': '最后跟进时间',
+        'db.customer.last_message': '最后消息内容',
+        'db.customer.photo_url': '头像URL',
+        'db.customer.tags': '标签',
+        'db.customer.notes': '备注',
+        'db.customer.is_archived': '已归档'
+      }
+      return fieldMap[field] || field.replace('db.customer.', '').replace('custom_fields.', '')
     }
 
     const getOperatorsForType = (fieldType: string) => {
@@ -4184,6 +5439,11 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
             { value: '<=', label: '早於等於' },
             { value: 'days_ago', label: 'N天前' },
             { value: 'days_from_now', label: 'N天後' }
+          ]
+        case 'boolean':
+          return [
+            { value: '==', label: '等於' },
+            { value: '!=', label: '不等於' }
           ]
         default: // text, custom
           return [
@@ -4214,30 +5474,59 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
         {(localData.mode || 'visual') === 'visual' ? (
           <>
               <div className="config-field">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                  <label>条件规则</label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                  <label style={{ fontSize: 15, fontWeight: 600, color: '#1f2937' }}>
+                    📋 条件规则
+                  </label>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
                       type="button"
                       onClick={addCondition}
                       className="small-action-button primary"
-                      style={{ fontSize: '12px', padding: '6px 12px' }}
+                      style={{ 
+                        fontSize: '13px', 
+                        fontWeight: 600,
+                        padding: '8px 16px',
+                        background: 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 8,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease',
+                        boxShadow: '0 2px 6px rgba(99, 102, 241, 0.3)'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'linear-gradient(135deg, #4f46e5 0%, #4338ca 100%)'
+                        e.currentTarget.style.transform = 'translateY(-1px)'
+                        e.currentTarget.style.boxShadow = '0 4px 10px rgba(99, 102, 241, 0.4)'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)'
+                        e.currentTarget.style.transform = 'translateY(0)'
+                        e.currentTarget.style.boxShadow = '0 2px 6px rgba(99, 102, 241, 0.3)'
+                      }}
                     >
-                      + 添加条件
+                      ➕ 添加条件
                     </button>
                   </div>
                 </div>
 
               {conditions.length === 0 ? (
                 <div style={{ 
-                  padding: 20, 
+                  padding: 32, 
                   textAlign: 'center', 
-                  color: '#666', 
-                  border: '2px dashed #ddd', 
-                  borderRadius: 8,
-                  background: '#f9f9f9'
+                  color: '#9ca3af', 
+                  border: '2px dashed #e5e7eb', 
+                  borderRadius: 12,
+                  background: 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)',
+                  fontSize: 14,
+                  fontWeight: 500
                 }}>
-                  点击"添加条件"开始配置条件规则
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>📝</div>
+                  <div>点击"添加条件"开始配置条件规则</div>
+                  <div style={{ fontSize: 12, color: '#d1d5db', marginTop: 4 }}>
+                    支持多条件组合，使用 AND/OR 逻辑运算
+                  </div>
                 </div>
               ) : (
                 <>
@@ -4255,23 +5544,68 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                     </div>
                   )}
 
-                  <div className="conditions-list">
+                  <div className="conditions-list" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                     {conditions.map((condition: any, index: number) => {
                       const fieldType = getFieldType(condition.field)
                       const operators = getOperatorsForType(fieldType)
                       
                       return (
-                        <div key={condition.id} className="condition-item">
+                        <div 
+                          key={condition.id} 
+                          className="condition-item"
+                          style={{
+                            background: 'linear-gradient(135deg, #f6f8fb 0%, #ffffff 100%)',
+                            border: '2px solid #e0e7ff',
+                            borderRadius: 12,
+                            padding: 16,
+                            boxShadow: '0 2px 8px rgba(99, 102, 241, 0.08)',
+                            transition: 'all 0.2s ease',
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.borderColor = '#818cf8'
+                            e.currentTarget.style.boxShadow = '0 4px 12px rgba(99, 102, 241, 0.15)'
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.borderColor = '#e0e7ff'
+                            e.currentTarget.style.boxShadow = '0 2px 8px rgba(99, 102, 241, 0.08)'
+                          }}
+                        >
                           {index > 0 && (
-                            <div className="logic-operator">
+                            <div 
+                              className="logic-operator"
+                              style={{
+                                position: 'absolute',
+                                top: -12,
+                                left: '50%',
+                                transform: 'translateX(-50%)',
+                                background: logicOperator === 'AND' ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' : 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                                color: 'white',
+                                padding: '4px 16px',
+                                borderRadius: 20,
+                                fontSize: 12,
+                                fontWeight: 600,
+                                boxShadow: '0 2px 6px rgba(0,0,0,0.15)',
+                                letterSpacing: '0.5px'
+                              }}
+                            >
                               {logicOperator}
                             </div>
                           )}
                           
-                          <div className="condition-controls">
+                          <div className="condition-controls" style={{ position: 'relative', display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
                             {/* 字段选择 */}
-                            <div className="condition-field">
-                              <label>字段</label>
+                            <div className="condition-field" style={{ flex: '1 1 200px', minWidth: '200px' }}>
+                              <label style={{ 
+                                display: 'block', 
+                                marginBottom: 6, 
+                                fontSize: 13, 
+                                fontWeight: 600, 
+                                color: '#4b5563',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px'
+                              }}>
+                                字段
+                              </label>
                               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                                 <select
                                   value={condition.field}
@@ -4285,53 +5619,85 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                       value: '' // 重置值
                                     })
                                   }}
-                                  style={{ flex: 1 }}
+                                  style={{ 
+                                    flex: 1,
+                                    padding: '8px 12px',
+                                    borderRadius: 8,
+                                    border: '1.5px solid #d1d5db',
+                                    fontSize: 14,
+                                    backgroundColor: 'white',
+                                    cursor: 'pointer'
+                                  }}
                                 >
                                   <option value="">选择字段...</option>
-                                  {Array.isArray(headerList) && headerList.length > 0 ? (
-                                    (() => {
-                                      const configuredDb = headerList.filter(h => h.startsWith('db.customer.'))
-                                        .filter(h => !['db.customer.budget_min','db.customer.budget_max','db.customer.preferred_location'].includes(h))
-                                      const customFields = headerList.filter(h => h.startsWith('custom_fields.'))
-                                      const baseDbFields = [
-                                        'db.customer.id','db.customer.name','db.customer.phone','db.customer.email','db.customer.status',
-                                        'db.customer.stage_id','db.customer.unread_count','db.customer.move_in_date','db.customer.updated_at',
-                                        'db.customer.last_timestamp','db.customer.last_follow_up_time','db.customer.photo_url','db.customer.last_message','db.customer.user_id'
-                                      ]
-                                      const dbFieldsSet = new Set([...baseDbFields, ...configuredDb])
-                                      const dbFields = Array.from(dbFieldsSet)
-                                      return (
-                                        <>
-                                          {dbFields.length > 0 && (
-                                            <optgroup label="数据库字段">
-                                              {dbFields.map(h => (
-                                                <option key={h} value={h}>{h.replace('db.customer.','')}</option>
-                                              ))}
-                                            </optgroup>
-                                          )}
-                                          {customFields.length > 0 && (
-                                            <optgroup label="自定义字段">
-                                              {customFields.map(h => (
-                                                <option key={h} value={h}>{h.replace('custom_fields.','')}</option>
-                                              ))}
-                                            </optgroup>
-                                          )}
-                                        </>
-                                      )
-                                    })()
-                                  ) : (
-                                    <>
-                                      <option value="db.customer.name">name</option>
-                                      <option value="db.customer.phone">phone</option>
-                                      <option value="db.customer.email">email</option>
-                                      <option value="db.customer.status">status</option>
-                                      <option value="db.customer.stage_id">stage_id</option>
-                                      <option value="db.customer.unread_count">unread_count</option>
-                                      <option value="db.customer.move_in_date">move_in_date</option>
-                                      <option value="db.customer.updated_at">updated_at</option>
-                                      <option value="db.customer.last_timestamp">last_timestamp</option>
-                                    </>
-                                  )}
+                                  {(() => {
+                                    // 定义完整的基础字段列表（排除内部字段）
+                                    const baseDbFields = [
+                                      'db.customer.name',
+                                      'db.customer.phone',
+                                      'db.customer.telegram_chat_id',
+                                      'db.customer.email',
+                                      'db.customer.status',
+                                      'db.customer.stage_id',
+                                      'db.customer.tags',
+                                      'db.customer.notes',
+                                      'db.customer.unread_count',
+                                      'db.customer.move_in_date',
+                                      'db.customer.last_message',
+                                      'db.customer.last_timestamp',
+                                      'db.customer.last_follow_up_time',
+                                      'db.customer.created_at',
+                                      'db.customer.updated_at',
+                                      'db.customer.photo_url',
+                                      'db.customer.is_archived'
+                                    ]
+                                    
+                                    // 合并配置的字段和基础字段
+                                    let configuredDb: string[] = []
+                                    let customFields: string[] = []
+                                    
+                                    // 内部字段列表（不应该在条件中使用）
+                                    const internalFields = [
+                                      'db.customer.id',
+                                      'db.customer.user_id',
+                                      'db.customer.version',
+                                      'db.customer.budget_min',
+                                      'db.customer.budget_max',
+                                      'db.customer.preferred_location'
+                                    ]
+                                    
+                                    if (Array.isArray(headerList) && headerList.length > 0) {
+                                      configuredDb = headerList.filter(h => h.startsWith('db.customer.'))
+                                        .filter(h => !internalFields.includes(h))
+                                      customFields = headerList.filter(h => h.startsWith('custom_fields.'))
+                                    }
+                                    
+                                    const dbFieldsSet = new Set([...baseDbFields, ...configuredDb])
+                                    const dbFields = Array.from(dbFieldsSet).sort()
+                                    
+                                    return (
+                                      <>
+                                        {dbFields.length > 0 && (
+                                          <optgroup label="📊 数据库字段">
+                                            {dbFields.map(h => (
+                                              <option key={h} value={h}>
+                                                {getFieldDisplayName(h)}
+                                              </option>
+                                            ))}
+                                          </optgroup>
+                                        )}
+                                        {customFields.length > 0 && (
+                                          <optgroup label="✨ 自定义字段">
+                                            {customFields.map(h => (
+                                              <option key={h} value={h}>
+                                                {h.replace('custom_fields.', '')}
+                                              </option>
+                                            ))}
+                                          </optgroup>
+                                        )}
+                                      </>
+                                    )
+                                  })()}
                                 </select>
                                 <button
                                   type="button"
@@ -4348,11 +5714,28 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                             </div>
 
                             {/* 操作符选择 */}
-                            <div className="condition-operator">
-                              <label>条件</label>
+                            <div className="condition-operator" style={{ flex: '0 1 160px', minWidth: '160px' }}>
+                              <label style={{ 
+                                display: 'block', 
+                                marginBottom: 6, 
+                                fontSize: 13, 
+                                fontWeight: 600, 
+                                color: '#4b5563',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.5px'
+                              }}>
+                                条件
+                              </label>
                               <select
                                 value={condition.operator}
                                 onChange={(e) => updateCondition(condition.id, { operator: e.target.value })}
+                                style={{
+                                  width: '100%',
+                                  padding: '8px 12px',
+                                  borderRadius: 8,
+                                  border: '1.5px solid #d1d5db',
+                                  fontSize: 14
+                                }}
                               >
                                 {operators.map(op => (
                                   <option key={op.value} value={op.value}>{op.label}</option>
@@ -4362,13 +5745,33 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
 
                             {/* 值输入 */}
                             {!['is_empty', 'is_not_empty'].includes(condition.operator) && (
-                              <div className="condition-value">
-                                <label>值</label>
+                              <div className="condition-value" style={{ flex: '1 1 200px', minWidth: '200px' }}>
+                                <label style={{ 
+                                  display: 'block', 
+                                  marginBottom: 6, 
+                                  fontSize: 13, 
+                                  fontWeight: 600, 
+                                  color: '#4b5563',
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.5px'
+                                }}>
+                                  值
+                                </label>
+                                {/* Stage 字段：下拉选择 */}
                                 {condition.field === 'db.customer.stage_id' ? (
                                   <select
                                     value={condition.value || ''}
                                     onChange={(e) => {
                                       updateCondition(condition.id, { value: e.target.value });
+                                    }}
+                                    style={{
+                                      width: '100%',
+                                      padding: '8px 12px',
+                                      borderRadius: 8,
+                                      border: '1.5px solid #d1d5db',
+                                      fontSize: 14,
+                                      backgroundColor: 'white',
+                                      cursor: 'pointer'
                                     }}
                                   >
                                     <option value="">选择阶段...</option>
@@ -4378,6 +5781,49 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                       </option>
                                     ))}
                                   </select>
+                                
+                                /* Status 字段：预定义选项 */
+                                ) : condition.field === 'db.customer.status' ? (
+                                  <select
+                                    value={condition.value || ''}
+                                    onChange={(e) => updateCondition(condition.id, { value: e.target.value })}
+                                    style={{
+                                      width: '100%',
+                                      padding: '8px 12px',
+                                      borderRadius: 8,
+                                      border: '1.5px solid #d1d5db',
+                                      fontSize: 14,
+                                      backgroundColor: 'white',
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    <option value="">选择状态...</option>
+                                    <option value="active">活跃 (active)</option>
+                                    <option value="inactive">不活跃 (inactive)</option>
+                                    <option value="blocked">已屏蔽 (blocked)</option>
+                                  </select>
+                                
+                                /* Boolean 字段：true/false 选择 */
+                                ) : fieldType === 'boolean' ? (
+                                  <select
+                                    value={condition.value || ''}
+                                    onChange={(e) => updateCondition(condition.id, { value: e.target.value })}
+                                    style={{
+                                      width: '100%',
+                                      padding: '8px 12px',
+                                      borderRadius: 8,
+                                      border: '1.5px solid #d1d5db',
+                                      fontSize: 14,
+                                      backgroundColor: 'white',
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    <option value="">选择...</option>
+                                    <option value="true">是 (true)</option>
+                                    <option value="false">否 (false)</option>
+                                  </select>
+                                
+                                /* Between 操作符：两个输入框 */
                                 ) : condition.operator === 'between' ? (
                                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                                     <input
@@ -4389,9 +5835,15 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                         updateCondition(condition.id, { value: parts.join(',') })
                                       }}
                                       placeholder="最小值"
-                                      style={{ flex: 1 }}
+                                      style={{ 
+                                        flex: 1,
+                                        padding: '8px 12px',
+                                        borderRadius: 8,
+                                        border: '1.5px solid #d1d5db',
+                                        fontSize: 14
+                                      }}
                                     />
-                                    <span>到</span>
+                                    <span style={{ color: '#6b7280', fontWeight: 600 }}>到</span>
                                     <input
                                       type={fieldType === 'number' ? 'number' : fieldType === 'date' ? 'date' : 'text'}
                                       value={condition.value?.split(',')[1] || ''}
@@ -4401,7 +5853,13 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                         updateCondition(condition.id, { value: parts.join(',') })
                                       }}
                                       placeholder="最大值"
-                                      style={{ flex: 1 }}
+                                      style={{ 
+                                        flex: 1,
+                                        padding: '8px 12px',
+                                        borderRadius: 8,
+                                        border: '1.5px solid #d1d5db',
+                                        fontSize: 14
+                                      }}
                                     />
                                   </div>
                                 ) : condition.operator === 'days_ago' || condition.operator === 'days_from_now' ? (
@@ -4412,9 +5870,15 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                       onChange={(e) => updateCondition(condition.id, { value: e.target.value })}
                                       placeholder="天数"
                                       min="0"
-                                      style={{ flex: 1 }}
+                                      style={{ 
+                                        flex: 1,
+                                        padding: '8px 12px',
+                                        borderRadius: 8,
+                                        border: '1.5px solid #d1d5db',
+                                        fontSize: 14
+                                      }}
                                     />
-                                    <span>天</span>
+                                    <span style={{ color: '#6b7280', fontWeight: 600 }}>天</span>
                                   </div>
                                 ) : (
                                   <input
@@ -4422,25 +5886,52 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                     value={condition.value || ''}
                                     onChange={(e) => updateCondition(condition.id, { value: e.target.value })}
                                     placeholder={fieldType === 'number' ? '输入数字' : fieldType === 'date' ? '选择日期' : '输入文本'}
+                                    style={{
+                                      width: '100%',
+                                      padding: '8px 12px',
+                                      borderRadius: 8,
+                                      border: '1.5px solid #d1d5db',
+                                      fontSize: 14,
+                                      transition: 'border-color 0.2s ease'
+                                    }}
+                                    onFocus={(e) => e.currentTarget.style.borderColor = '#6366f1'}
+                                    onBlur={(e) => e.currentTarget.style.borderColor = '#d1d5db'}
                                   />
                                 )}
                               </div>
                             )}
 
                             {/* 删除按钮 */}
-                            <div className="condition-actions">
+                            <div className="condition-actions" style={{ flex: '0 0 auto' }}>
                               <button
                                 type="button"
                                 onClick={() => removeCondition(condition.id)}
                                 className="small-action-button"
                                 style={{ 
-                                  background: 'linear-gradient(135deg, #f56565 0%, #e53e3e 100%)',
+                                  background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
                                   color: 'white',
-                                  fontSize: '12px',
-                                  padding: '6px 10px'
+                                  fontSize: '13px',
+                                  fontWeight: 600,
+                                  padding: '8px 16px',
+                                  border: 'none',
+                                  borderRadius: 8,
+                                  cursor: 'pointer',
+                                  transition: 'all 0.2s ease',
+                                  boxShadow: '0 2px 6px rgba(239, 68, 68, 0.3)',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.background = 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)'
+                                  e.currentTarget.style.transform = 'translateY(-1px)'
+                                  e.currentTarget.style.boxShadow = '0 4px 10px rgba(239, 68, 68, 0.4)'
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)'
+                                  e.currentTarget.style.transform = 'translateY(0)'
+                                  e.currentTarget.style.boxShadow = '0 2px 6px rgba(239, 68, 68, 0.3)'
                                 }}
                               >
-                                删除
+                                🗑️ 删除
                               </button>
                             </div>
                           </div>
@@ -4780,7 +6271,7 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
               overflow: 'auto',
               paddingRight: '8px'
             }}>
-            {showVariableSelector.position === 'smart_body' ? (
+            {(showVariableSelector.position === 'smart_body' || showVariableSelector.position?.startsWith('smart_template_')) ? (
               // 智能变量专用显示
               <div style={{ marginBottom: '24px' }}>
                 <div style={{
@@ -4856,16 +6347,16 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                         color: '#a16207',
                         opacity: 0.8
                       }}>
-                        🔗 数据源: {varConfig.data_source || '未设置'}
+                        🔗 数据源: {varConfig.source || '未设置'}
                       </div>
-                      {varConfig.data_transformation && (
+                      {varConfig.transformer && varConfig.transformer !== 'None' && (
                         <div style={{
                           fontSize: '12px',
                           color: '#a16207',
                           opacity: 0.8,
                           marginTop: '4px'
                         }}>
-                          🔄 转换: {varConfig.data_transformation}
+                          🔄 转换: {varConfig.transformer}
                         </div>
                       )}
                     </div>

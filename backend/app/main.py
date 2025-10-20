@@ -11,6 +11,7 @@ from app.metrics import metrics
 from fastapi.responses import JSONResponse
 import asyncio # Import asyncio
 from app.services.telegram_listener import TelegramListenerManager # Import TelegramListenerManager
+from datetime import datetime
 
 app = FastAPI(redirect_slashes=False)
 
@@ -72,13 +73,126 @@ async def periodic_telegram_health_check():
             logger.error(f"Error in periodic health check: {e}")
             await asyncio.sleep(60)  # 出错时等待1分钟再继续
 
+# 🆕 新增：DbTrigger 调度器
+async def periodic_db_trigger_scheduler():
+    """定期执行 DbTrigger 工作流"""
+    while True:
+        try:
+            await asyncio.sleep(60)  # 每1分钟检查一次
+            logger.debug("🔍 Checking for scheduled DbTrigger workflows...")
+            
+            from app.db.database import get_db
+            from app.services.workflow_engine import WorkflowEngine
+            from app.db import models
+            import hashlib
+            import json
+            
+            db = next(get_db())
+            try:
+                # 获取所有活跃的 DbTrigger 工作流
+                workflows = db.query(models.Workflow).filter(
+                    models.Workflow.is_active == True
+                ).all()
+                
+                for workflow in workflows:
+                    try:
+                        nodes = workflow.nodes or []
+                        edges = workflow.edges or []
+                        
+                        # 🔧 修复：只处理以 DbTrigger 节点作为起始节点的工作流
+                        # 找到所有没有入边的节点（起始节点）
+                        nodes_with_incoming = set()
+                        for edge in edges:
+                            target_node_id = edge.get("target")
+                            if target_node_id:
+                                nodes_with_incoming.add(target_node_id)
+                        
+                        # 查找起始的 DbTrigger 节点
+                        dbtrigger_start_nodes = []
+                        for node in nodes:
+                            node_id = node.get("id")
+                            node_type = node.get("type")
+                            if node_type == "DbTrigger" and node_id not in nodes_with_incoming:
+                                dbtrigger_start_nodes.append(node)
+                        
+                        if not dbtrigger_start_nodes:
+                            # 跳过没有起始 DbTrigger 节点的工作流
+                            logger.debug(f"Skipping workflow {workflow.name} (ID: {workflow.id}) - no starting DbTrigger node")
+                            continue
+                        
+                        # 处理每个起始的 DbTrigger 节点
+                        for node in dbtrigger_start_nodes:
+                            node_data = node.get("data", {})
+                            config = node_data.get("config", {})
+                            
+                            # 检查触发模式
+                            trigger_mode = config.get("trigger_mode", "scheduled")
+                            if trigger_mode not in ["scheduled", "hybrid"]:
+                                continue
+                            
+                            # 检查调度间隔
+                            schedule = config.get("schedule", {})
+                            interval = schedule.get("interval", 300)  # 默认5分钟
+                            enabled = schedule.get("enabled", True)
+                            
+                            if not enabled:
+                                continue
+                            
+                            # 检查上次执行时间
+                            last_run_key = f"dbtrigger_last_run_{workflow.id}"
+                            last_run = getattr(workflow, 'last_db_trigger_run', None)
+                            
+                            now = datetime.utcnow()
+                            if last_run and (now - last_run).total_seconds() < interval:
+                                continue
+                            
+                            # 执行 DbTrigger 工作流
+                            logger.info(f"🔄 Executing scheduled DbTrigger workflow: {workflow.name} (ID: {workflow.id})")
+                            
+                            workflow_engine = WorkflowEngine(db)
+                            db_trigger_data = {
+                                "trigger_type": "db_scheduled",
+                                "type": "db_change",
+                                "table": config.get("table", "customers"),
+                                "field": config.get("field"),
+                                "condition": config.get("condition", "equals"),
+                                "value": config.get("value", ""),
+                                "user_id": workflow.user_id,
+                                "timestamp": now.isoformat(),
+                                "scheduled": True
+                            }
+                            
+                            await workflow_engine.execute_workflow(workflow.id, db_trigger_data)
+                            
+                            # 更新最后执行时间
+                            workflow.last_db_trigger_run = now
+                            db.commit()
+                            
+                            # 只处理第一个匹配的 DbTrigger 节点
+                            break
+                                
+                    except Exception as e:
+                        logger.error(f"Error executing DbTrigger workflow {workflow.id}: {e}")
+                        continue
+                        
+            finally:
+                db.close()
+                
+        except asyncio.CancelledError:
+            logger.info("DbTrigger scheduler task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in DbTrigger scheduler: {e}")
+            await asyncio.sleep(60)  # 出错时等待1分钟再继续
+
 # 全局任务引用
 health_check_task = None
+db_trigger_scheduler_task = None
 
 # ✅ 启动时创建表和启动 Telegram 监听器
 @app.on_event("startup")
 async def on_startup(): # Make it async
-    global health_check_task
+    global health_check_task, db_trigger_scheduler_task
     init_db()
     create_default_subscription_plans()
     await ensure_telegram_listener()
@@ -86,10 +200,14 @@ async def on_startup(): # Make it async
     # 启动定期健康检查任务
     health_check_task = asyncio.create_task(periodic_telegram_health_check())
     logger.info("✅ Periodic Telegram health check task started")
+    
+    # 启动 DbTrigger 调度器
+    db_trigger_scheduler_task = asyncio.create_task(periodic_db_trigger_scheduler())
+    logger.info("✅ DbTrigger scheduler task started")
 
 @app.on_event("shutdown")
 async def on_shutdown(): # Add shutdown event
-    global telegram_listener_instance, health_check_task
+    global telegram_listener_instance, health_check_task, db_trigger_scheduler_task
     
     # 停止健康检查任务
     if health_check_task:
@@ -99,6 +217,15 @@ async def on_shutdown(): # Add shutdown event
         except asyncio.CancelledError:
             pass
         logger.info("✅ Periodic health check task stopped")
+    
+    # 停止 DbTrigger 调度器
+    if db_trigger_scheduler_task:
+        db_trigger_scheduler_task.cancel()
+        try:
+            await db_trigger_scheduler_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("✅ DbTrigger scheduler task stopped")
     
     # 停止Telegram监听器
     if telegram_listener_instance:

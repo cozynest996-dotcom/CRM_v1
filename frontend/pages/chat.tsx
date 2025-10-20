@@ -46,15 +46,7 @@ const fetcher = async (url: string) => {
 }
 
 const SidebarComponent = ({ children }: any) => (
-  <div style={{ width: 300, borderRight: '1px solid #eee', padding: 12, overflow: 'auto' }}>{children}</div>
-)
-
-const ChatWindow = ({ children }: any) => (
-  <div style={{ flex: 1, padding: 12, display: 'flex', flexDirection: 'column' }}>{children}</div>
-)
-
-const DetailsPanel = ({ children }: any) => (
-  <div style={{ width: 320, borderLeft: '1px solid #eee', padding: 12 }}>{children}</div>
+  <>{children}</>
 )
 
 function AckIcon({ ack }: { ack: number | null }) {
@@ -81,6 +73,10 @@ export default function HomePage() {
   const [isEditing, setIsEditing] = useState(false)
   const [selectedChannel, setSelectedChannel] = useState<'whatsapp' | 'telegram'>('whatsapp') // 新增：用于选择发送渠道
   const [searchQuery, setSearchQuery] = useState('') // 新增：搜索查询
+  const [activeTab, setActiveTab] = useState<'info' | 'notes'>('info') // 标签页切换
+  const [notesValue, setNotesValue] = useState('') // 备注内容
+  const [customFieldsValue, setCustomFieldsValue] = useState<Record<string, any>>({}) // 自定义字段
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; type: 'customer' | 'message'; id: string | number } | null>(null) // 右键菜单
   
   // Refs
   const messagesContainerRef = React.useRef<HTMLDivElement>(null)
@@ -136,7 +132,16 @@ export default function HomePage() {
   useEffect(() => {
     setPhoneValue(customerDetail?.phone || '')
     setEmailValue(customerDetail?.email || '')
+    setNotesValue(customerDetail?.notes || '')
+    setCustomFieldsValue(customerDetail?.custom_fields || {})
   }, [customerDetail])
+
+  // 关闭右键菜单
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null)
+    window.addEventListener('click', handleClick)
+    return () => window.removeEventListener('click', handleClick)
+  }, [])
 
   // SSE连接
   React.useEffect(() => {
@@ -295,8 +300,68 @@ export default function HomePage() {
     }
   }
 
+  // 删除客户
+  const deleteCustomer = async (customerId: string) => {
+    if (!confirm('⚠️ 确定要删除此客户吗？\n\n这将永久删除客户资料和所有聊天记录，此操作无法撤销！')) {
+      return
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/customers/${customerId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      })
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText)
+        alert(`删除失败: ${res.status} ${errText}`)
+        return
+      }
+
+      // 如果删除的是当前选中的客户，清空选择
+      if (customerId === selectedCustomer) {
+        setSelectedCustomer(null)
+        setCustomerDetail(null)
+      }
+
+      // 刷新客户列表
+      mutateCustomers()
+      alert('✅ 客户已删除')
+    } catch (err) {
+      console.error('delete customer failed', err)
+      alert('❌ 删除时发生错误')
+    }
+  }
+
+  // 删除单条消息
+  const deleteMessage = async (messageId: number) => {
+    if (!confirm('确定要删除这条消息吗？')) {
+      return
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/messages/${messageId}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
+      })
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => res.statusText)
+        alert(`删除失败: ${res.status} ${errText}`)
+        return
+      }
+
+      // 刷新消息列表
+      mutateMessages()
+      alert('✅ 消息已删除')
+    } catch (err) {
+      console.error('delete message failed', err)
+      alert('❌ 删除时发生错误')
+    }
+  }
+
   return (
-      <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
+      <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif', overflow: 'hidden' }}>
         {/* Top section headers for three columns */}
         <div style={{ position: 'fixed', left: 70, right: 0, top: 0, height: 48, display: 'flex', alignItems: 'center', padding: '0 16px', background: '#fff', borderBottom: '1px solid #eee', zIndex: 50 }}>
           <div style={{ flex: 1, fontWeight: 700 }}>Customer List</div>
@@ -311,9 +376,19 @@ export default function HomePage() {
         flex: 1,
         transition: 'margin-left 0.3s ease',
         display: 'flex',
-        paddingTop: 48 // leave space for fixed header
+        paddingTop: 48, // leave space for fixed header
+        height: '100vh', // 固定高度为视口高度
+        overflow: 'hidden' // 防止整体滚动
       }}>
-        <div style={{ width: 300, padding: 12, background: '#f8f9fa', borderRight: '1px solid #e9ecef' }}>
+        <div style={{ 
+          width: 300, 
+          padding: 12, 
+          background: '#f8f9fa', 
+          borderRight: '1px solid #e9ecef',
+          height: 'calc(100vh - 48px)', // 减去顶部header高度
+          overflowY: 'auto', // 只让客户列表滚动
+          overflowX: 'hidden'
+        }}>
           <SidebarComponent>
             {/* 搜索框 */}
             <div style={{ marginBottom: 16 }}>
@@ -347,7 +422,12 @@ export default function HomePage() {
               boxShadow: c.id === selectedCustomer ? '0 2px 8px rgba(0,123,255,0.3)' : '0 1px 3px rgba(0,0,0,0.1)',
               border: '1px solid ' + (c.id === selectedCustomer ? '#007bff' : '#e9ecef'),
               transition: 'all 0.2s ease'
-            }} onClick={async () => {
+            }} 
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setContextMenu({ x: e.clientX, y: e.clientY, type: 'customer', id: c.id })
+            }}
+            onClick={async () => {
               // If clicking the already-selected customer, refresh detail + messages
               if (c.id === selectedCustomer) {
                 try {
@@ -435,7 +515,13 @@ export default function HomePage() {
           </SidebarComponent>
         </div>
 
-        <ChatWindow>
+        <div style={{ 
+          flex: 1, 
+          display: 'flex', 
+          flexDirection: 'column',
+          height: 'calc(100vh - 48px)', // 减去顶部header高度
+          overflow: 'hidden' // 防止整体滚动
+        }}>
           <div ref={messagesContainerRef} style={{ 
             flex: 1, 
             overflow: 'auto', 
@@ -474,7 +560,10 @@ export default function HomePage() {
                         display: 'flex',
                         justifyContent: m.direction === 'outbound' ? 'flex-end' : 'flex-start'
                       }} />
-                      <div style={{ margin: '8px 0', textAlign: m.direction === 'outbound' ? 'right' : 'left' }}>
+                      <div style={{ 
+                        margin: '8px 0', 
+                        textAlign: m.direction === 'outbound' ? 'right' : 'left'
+                      }}>
                         <div style={{
                           display: 'inline-block',
                           maxWidth: '70%',
@@ -485,8 +574,14 @@ export default function HomePage() {
                           boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
                           border: m.direction === 'outbound' ? 'none' : '1px solid #e9ecef',
                           position: 'relative',
-                          wordWrap: 'break-word' // 确保长文本自动换行
-                        }}>
+                          wordWrap: 'break-word', // 确保长文本自动换行
+                          cursor: 'context-menu'
+                        }}
+                          onContextMenu={(e) => {
+                            e.preventDefault()
+                            setContextMenu({ x: e.clientX, y: e.clientY, type: 'message', id: m.id })
+                          }}
+                        >
                           <div>{m.content}</div>
                           <div style={{
                             fontSize: '11px',
@@ -517,7 +612,14 @@ export default function HomePage() {
               </>
             )}
           </div>
-          <div style={{ marginTop: 12 }}>
+          
+          {/* 消息输入区域 - 固定在底部 */}
+          <div style={{ 
+            padding: '16px',
+            background: 'white',
+            borderTop: '1px solid #e9ecef',
+            flexShrink: 0 // 防止被压缩
+          }}>
             <textarea 
               value={text} 
               onChange={e => setText(e.target.value)} 
@@ -527,7 +629,15 @@ export default function HomePage() {
                   sendMessage()
                 }
               }}
-              style={{ width: '100%', height: 80 }} 
+              style={{ 
+                width: '100%', 
+                height: 80,
+                border: '1px solid #dee2e6',
+                borderRadius: '6px',
+                padding: '8px 12px',
+                fontSize: '14px',
+                resize: 'none'
+              }} 
               placeholder="Type a message..." 
             />
             <div style={{ textAlign: 'right', marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -562,24 +672,49 @@ export default function HomePage() {
               <button onClick={sendMessage} style={{ padding: '8px 16px', borderRadius: '6px', background: '#007bff', color: 'white', border: 'none', cursor: 'pointer' }}>Send</button>
             </div>
           </div>
-        </ChatWindow>
+        </div>
 
-        <DetailsPanel>
+        <div style={{ 
+          width: 320, 
+          borderLeft: '1px solid #eee', 
+          padding: '20px 12px 12px 12px',
+          height: 'calc(100vh - 48px)', // 减去顶部header高度
+          overflowY: 'auto', // 独立滚动
+          overflowX: 'hidden',
+          background: '#fafbfc',
+          boxSizing: 'border-box'
+        }}>
           {customerDetail ? (
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <img key={`detail-avatar-${selectedCustomer || (customerDetail && customerDetail.id) || 'none'}`} src={(customerDetail && customerDetail.photo_url) || PLACEHOLDER_AVATAR} alt="avatar" crossOrigin="anonymous" style={{ width: 80, height: 80, borderRadius: 40, objectFit: 'cover', backgroundColor: '#fff', display: 'block' }} onError={(e)=>{(e.target as HTMLImageElement).src=PLACEHOLDER_AVATAR}} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <div style={{ fontWeight: 700, fontSize: 16 }}>{customerDetail.name || customerDetail.phone}</div>
-                    <div>
-                      {/** Edit / Save buttons handled below **/}
-                    </div>
-                  </div>
-                  <div style={{ color: '#666' }}>{customerDetail.email}</div>
-                </div>
-                <div>
-                  <button onClick={async () => {
+            <div style={{ paddingTop: 8, paddingBottom: 20 }}>
+              {/* 头部区域 - 头像和基本信息 */}
+              <div style={{ 
+                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                borderRadius: 12,
+                padding: 20,
+                marginBottom: 20,
+                boxShadow: '0 4px 12px rgba(102, 126, 234, 0.3)'
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+                  <div style={{ position: 'relative' }}>
+                    <img 
+                      key={`detail-avatar-${selectedCustomer || (customerDetail && customerDetail.id) || 'none'}`} 
+                      src={(customerDetail && customerDetail.photo_url) || PLACEHOLDER_AVATAR} 
+                      alt="avatar" 
+                      crossOrigin="anonymous" 
+                      style={{ 
+                        width: 100, 
+                        height: 100, 
+                        borderRadius: 50, 
+                        objectFit: 'cover', 
+                        backgroundColor: '#fff', 
+                        display: 'block',
+                        border: '4px solid white',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+                      }} 
+                      onError={(e)=>{(e.target as HTMLImageElement).src=PLACEHOLDER_AVATAR}} 
+                    />
+                    <button 
+                      onClick={async () => {
                     const url = prompt('Enter image URL', customerDetail.photo_url || '')
                     if (!url) return
                     try {
@@ -587,49 +722,472 @@ export default function HomePage() {
                       if (!res.ok) throw new Error('Failed')
                       setCustomerDetail({ ...customerDetail, photo_url: url })
                       mutateCustomers()
-                      alert('Saved')
-                    } catch (err) { console.error(err); alert('Save failed') }
-                  }}>Change Photo</button>
+                          alert('头像已更新')
+                        } catch (err) { console.error(err); alert('更新失败') }
+                      }}
+                      style={{
+                        position: 'absolute',
+                        bottom: 0,
+                        right: 0,
+                        background: 'white',
+                        border: 'none',
+                        borderRadius: '50%',
+                        width: 32,
+                        height: 32,
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+                        fontSize: '16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                      title="更换头像"
+                    >
+                      📷
+                    </button>
+                </div>
+                  <div style={{ textAlign: 'center', color: 'white' }}>
+                    <div style={{ fontWeight: 700, fontSize: 20, marginBottom: 4 }}>
+                      {customerDetail.name || customerDetail.phone || '未命名客户'}
+              </div>
+                    {customerDetail.email && (
+                      <div style={{ fontSize: 13, opacity: 0.9 }}>{customerDetail.email}</div>
+                    )}
                 </div>
               </div>
-
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><strong>Phone</strong>
-                  {!isEditing && <button onClick={() => setIsEditing(true)}>Edit</button>}
-                </div>
-                <input disabled={!isEditing} value={phoneValue} onChange={(e) => setPhoneValue(e.target.value)} style={{ width: '100%', padding: 8 }} />
               </div>
 
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Email</strong></div>
-                <input disabled={!isEditing} value={emailValue} onChange={(e) => setEmailValue(e.target.value)} style={{ width: '100%', padding: 8 }} />
+              {/* 标签页切换 */}
+              <div style={{ 
+                display: 'flex', 
+                gap: 8, 
+                marginBottom: 16,
+                borderBottom: '2px solid #e9ecef'
+              }}>
+                <button
+                  onClick={() => setActiveTab('info')}
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    background: activeTab === 'info' ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : 'transparent',
+                    color: activeTab === 'info' ? 'white' : '#6c757d',
+                    border: 'none',
+                    borderBottom: activeTab === 'info' ? 'none' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    fontSize: 14,
+                    borderRadius: '8px 8px 0 0',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  📋 客户信息
+                </button>
+                <button
+                  onClick={() => setActiveTab('notes')}
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    background: activeTab === 'notes' ? 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' : 'transparent',
+                    color: activeTab === 'notes' ? 'white' : '#6c757d',
+                    border: 'none',
+                    borderBottom: activeTab === 'notes' ? 'none' : '2px solid transparent',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    fontSize: 14,
+                    borderRadius: '8px 8px 0 0',
+                    transition: 'all 0.2s ease'
+                  }}
+                >
+                  📝 备注
+                </button>
               </div>
 
-              {isEditing && (
-                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button onClick={async () => {
+              {activeTab === 'info' && (
+                <>
+              {/* 编辑按钮区域 */}
+              <div style={{ 
+                display: 'flex', 
+                gap: 8, 
+                marginBottom: 20,
+                padding: '12px',
+                background: '#f8f9fa',
+                borderRadius: 8,
+                border: '1px solid #e9ecef'
+              }}>
+                {!isEditing ? (
+                  <button 
+                    onClick={() => setIsEditing(true)}
+                    style={{
+                      flex: 1,
+                      padding: '10px 16px',
+                      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                      fontSize: 14,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 6
+                    }}
+                  >
+                    ✏️ 编辑信息
+                  </button>
+                ) : (
+                  <>
+                    <button 
+                      onClick={async () => {
                     if (!customerDetail) return
                     const payload: any = {}
                     if (phoneValue !== customerDetail.phone) payload.phone = phoneValue
                     if (emailValue !== customerDetail.email) payload.email = emailValue
+                    if (customerDetail.name !== (customerDetail.name || '')) payload.name = customerDetail.name
+                    if (JSON.stringify(customFieldsValue) !== JSON.stringify(customerDetail.custom_fields || {})) {
+                      payload.custom_fields = customFieldsValue
+                    }
                     if (!Object.keys(payload).length) { setIsEditing(false); return }
                     try {
                       const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, { method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify(payload) })
                       if (!res.ok) throw new Error('Failed')
-                      // reload detail
                       await loadDetail(customerDetail.id)
                       mutateCustomers()
                       setIsEditing(false)
-                    } catch (err) { console.error(err); alert('Save failed') }
-                  }}>Save</button>
-                  <button onClick={() => { setPhoneValue(customerDetail?.phone || ''); setEmailValue(customerDetail?.email || ''); setIsEditing(false) }}>Cancel</button>
-                </div>
-              )}
+                          alert('✅ 保存成功')
+                        } catch (err) { console.error(err); alert('❌ 保存失败') }
+                      }}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                        fontSize: 14
+                      }}
+                    >
+                      ✅ 保存
+                    </button>
+                    <button 
+                      onClick={() => { 
+                        setPhoneValue(customerDetail?.phone || ''); 
+                        setEmailValue(customerDetail?.email || '');
+                        setCustomFieldsValue(customerDetail?.custom_fields || {});
+                        setCustomerDetail({ ...customerDetail }); // 重置 name
+                        setIsEditing(false) 
+                      }}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        background: '#6c757d',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                        fontSize: 14
+                      }}
+                    >
+                      ❌ 取消
+                    </button>
+                  </>
+                )}
+              </div>
 
-              {/* Read-only timestamps */}
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Last Contact</strong></div>
-                <div style={{ padding: 8, background: '#fafafa', borderRadius: 6 }}>
+              {/* 基本信息卡片 */}
+              <div style={{ 
+                background: 'white',
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ 
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: '#495057',
+                  marginBottom: 16,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  borderBottom: '2px solid #667eea',
+                  paddingBottom: 8
+                }}>
+                  📱 基本信息
+                </div>
+                
+                {/* 客户姓名 */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    👤 客户姓名
+                  </label>
+                  <input 
+                    disabled={!isEditing} 
+                    value={customerDetail.name || ''} 
+                    onChange={(e) => setCustomerDetail({ ...customerDetail, name: e.target.value })}
+                    style={{ 
+                      width: '100%', 
+                      padding: '10px 12px',
+                      border: isEditing ? '2px solid #667eea' : '1px solid #dee2e6',
+                      borderRadius: 6,
+                      fontSize: 14,
+                      backgroundColor: isEditing ? 'white' : '#f8f9fa',
+                      transition: 'all 0.2s ease'
+                    }} 
+                    placeholder="请输入客户姓名"
+                  />
+                </div>
+
+                {/* 电话号码 */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    📞 电话号码
+                  </label>
+                  <input 
+                    disabled={!isEditing} 
+                    value={phoneValue} 
+                    onChange={(e) => setPhoneValue(e.target.value)}
+                    style={{ 
+                      width: '100%', 
+                      padding: '10px 12px',
+                      border: isEditing ? '2px solid #667eea' : '1px solid #dee2e6',
+                      borderRadius: 6,
+                      fontSize: 14,
+                      backgroundColor: isEditing ? 'white' : '#f8f9fa',
+                      transition: 'all 0.2s ease'
+                    }} 
+                    placeholder="请输入电话号码"
+                  />
+                </div>
+
+                {/* 邮箱 */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    📧 邮箱地址
+                  </label>
+                  <input 
+                    disabled={!isEditing} 
+                    value={emailValue} 
+                    onChange={(e) => setEmailValue(e.target.value)}
+                    style={{ 
+                      width: '100%', 
+                      padding: '10px 12px',
+                      border: isEditing ? '2px solid #667eea' : '1px solid #dee2e6',
+                      borderRadius: 6,
+                      fontSize: 14,
+                      backgroundColor: isEditing ? 'white' : '#f8f9fa',
+                      transition: 'all 0.2s ease'
+                    }} 
+                    placeholder="请输入邮箱地址"
+                  />
+                </div>
+              </div>
+
+              {/* 状态管理卡片 */}
+              <div style={{ 
+                background: 'white',
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ 
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: '#495057',
+                  marginBottom: 16,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  borderBottom: '2px solid #f59e0b',
+                  paddingBottom: 8
+                }}>
+                  🎯 状态管理
+                </div>
+
+                {/* Stage 阶段 */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    📊 当前阶段
+                  </label>
+                  <select 
+                    disabled={detailLoading} 
+                    value={customerDetail?.stage_id ? String(customerDetail.stage_id) : ''} 
+                    onChange={async (e) => {
+                      const val = e.target.value || ''
+                      const stageId = val === '' ? null : parseInt(val, 10)
+                      if (stageId !== null && stages && !stages.find((s: any) => Number(s.id) === Number(stageId))) { 
+                        alert('无效的阶段'); 
+                        return 
+                      }
+                      try {
+                        const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, { 
+                          method: 'PATCH', 
+                          headers: getAuthHeaders(), 
+                          body: JSON.stringify({ stage_id: stageId }) 
+                        })
+                        if (!res.ok) throw new Error('Failed')
+                        setCustomerDetail({ ...customerDetail, stage_id: stageId })
+                        mutateCustomers()
+                        alert('✅ 阶段已更新')
+                      } catch (err) { console.error(err); alert('❌ 更新失败') }
+                    }} 
+                    style={{ 
+                      width: '100%', 
+                      padding: '10px 12px',
+                      border: '1px solid #dee2e6',
+                      borderRadius: 6,
+                      fontSize: 14,
+                      backgroundColor: 'white',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">无阶段</option>
+                    {(stages || []).map((s: any) => (
+                      <option key={s.id} value={String(s.id)}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Status 状态 */}
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    🚦 客户状态
+                  </label>
+                  <select 
+                    disabled={detailLoading} 
+                    value={customerDetail?.status || ''} 
+                    onChange={async (e) => {
+                      const status = e.target.value
+                      try {
+                        const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, { 
+                          method: 'PATCH', 
+                          headers: getAuthHeaders(), 
+                          body: JSON.stringify({ status }) 
+                        })
+                        if (!res.ok) throw new Error('Failed')
+                        setCustomerDetail({ ...customerDetail, status })
+                        mutateCustomers()
+                        alert('✅ 状态已更新')
+                      } catch (err) { console.error(err); alert('❌ 更新失败') }
+                    }} 
+                    style={{ 
+                      width: '100%', 
+                      padding: '10px 12px',
+                      border: '1px solid #dee2e6',
+                      borderRadius: 6,
+                      fontSize: 14,
+                      backgroundColor: 'white',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">选择状态</option>
+                    <option value="new">🆕 新客户</option>
+                    <option value="active">✅ 活跃</option>
+                    <option value="inactive">💤 不活跃</option>
+                    <option value="blocked">🚫 已屏蔽</option>
+                  </select>
+                </div>
+
+                {/* Unread Count */}
+                <div>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    💬 未读消息
+                  </label>
+                  <div style={{ 
+                    padding: '10px 12px',
+                    background: customerDetail?.unread_count > 0 ? 'linear-gradient(135deg, #fee2e2 0%, #fecaca 100%)' : '#f9fafb',
+                    borderRadius: 6,
+                    color: customerDetail?.unread_count > 0 ? '#dc2626' : '#6b7280',
+                    fontWeight: 600,
+                    fontSize: 14,
+                    textAlign: 'center',
+                    border: customerDetail?.unread_count > 0 ? '1px solid #fca5a5' : '1px solid #e5e7eb'
+                  }}>
+                    {customerDetail?.unread_count || 0} 条未读
+                  </div>
+                </div>
+              </div>
+
+              {/* 时间信息卡片 */}
+              <div style={{ 
+                background: 'white',
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ 
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: '#495057',
+                  marginBottom: 16,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  borderBottom: '2px solid #3b82f6',
+                  paddingBottom: 8
+                }}>
+                  ⏰ 时间信息
+                </div>
+
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    📅 最后联系时间
+                  </label>
+                  <div style={{ 
+                    padding: '10px 12px',
+                    background: '#f0f9ff',
+                    borderRadius: 6,
+                    fontSize: 14,
+                    color: '#1e40af',
+                    border: '1px solid #bfdbfe'
+                  }}>
                   {(() => {
                     const ts = customerDetail.last_timestamp || customerDetail.updated_at
                     if (!ts) return '—'
@@ -643,9 +1201,24 @@ export default function HomePage() {
                 </div>
               </div>
 
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Last Updated</strong></div>
-                <div style={{ padding: 8, background: '#fafafa', borderRadius: 6 }}>
+                <div>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    🔄 最后更新时间
+                  </label>
+                  <div style={{ 
+                    padding: '10px 12px',
+                    background: '#f0fdf4',
+                    borderRadius: 6,
+                    fontSize: 14,
+                    color: '#166534',
+                    border: '1px solid #bbf7d0'
+                  }}>
                   {(() => {
                     const ts = customerDetail.updated_at
                     if (!ts) return '—'
@@ -658,134 +1231,436 @@ export default function HomePage() {
                   })()}
                 </div>
               </div>
-
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Stage</strong></div>
-                <select disabled={detailLoading} value={customerDetail?.stage_id ? String(customerDetail.stage_id) : ''} onChange={async (e) => {
-                  const val = e.target.value || ''
-                  const stageId = val === '' ? null : parseInt(val, 10)
-                  // validate against stages
-                  if (stageId !== null && stages && !stages.find((s: any) => Number(s.id) === Number(stageId))) { alert('Invalid stage'); return }
-                  try {
-                    const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, { method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify({ stage_id: stageId }) })
-                    if (!res.ok) throw new Error('Failed')
-                    setCustomerDetail({ ...customerDetail, stage_id: stageId })
-                    mutateCustomers()
-                  } catch (err) { console.error(err); alert('Save failed') }
-                }} style={{ width: '100%', padding: 8 }}>
-                  <option value="">None</option>
-                  {(stages || []).map((s: any) => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
-                </select>
               </div>
 
-              {/* 新增：Telegram Chat ID */}
+              {/* 联系渠道卡片 */}
               {customerDetail?.telegram_chat_id && (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ marginBottom: 8 }}><strong>Telegram Chat ID</strong></div>
-                  <div style={{ 
-                    padding: 8, 
-                    background: '#f0f9ff', 
-                    borderRadius: 6, 
-                    fontFamily: 'monospace',
-                    fontSize: '14px',
-                    color: '#0088cc',
-                    border: '1px solid #bae6fd'
-                  }}>
-                    {customerDetail.telegram_chat_id}
-                  </div>
-                </div>
-              )}
-
-              {/* 新增：Status */}
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Status</strong></div>
-                <select 
-                  disabled={detailLoading} 
-                  value={customerDetail?.status || ''} 
-                  onChange={async (e) => {
-                    const status = e.target.value
-                    try {
-                      const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, { 
-                        method: 'PATCH', 
-                        headers: getAuthHeaders(), 
-                        body: JSON.stringify({ status }) 
-                      })
-                      if (!res.ok) throw new Error('Failed')
-                      setCustomerDetail({ ...customerDetail, status })
-                      mutateCustomers()
-                    } catch (err) { console.error(err); alert('Save failed') }
-                  }} 
-                  style={{ width: '100%', padding: 8 }}
-                >
-                  <option value="">Select Status</option>
-                  <option value="new">New</option>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                  <option value="blocked">Blocked</option>
-                </select>
-              </div>
-
-              {/* 新增：Unread Count */}
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Unread Messages</strong></div>
                 <div style={{ 
-                  padding: 8, 
-                  background: customerDetail?.unread_count > 0 ? '#fef2f2' : '#f9fafb', 
-                  borderRadius: 6,
-                  color: customerDetail?.unread_count > 0 ? '#dc2626' : '#6b7280',
-                  fontWeight: '500'
-                }}>
-                  {customerDetail?.unread_count || 0} unread
-                </div>
-              </div>
-
-              {/* 新增：Custom Fields */}
-              {customerDetail?.custom_fields && Object.keys(customerDetail.custom_fields).length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ marginBottom: 8 }}><strong>Custom Fields</strong></div>
-                  <div style={{ 
-                    padding: 8, 
-                    background: '#f8f9fa', 
-                    borderRadius: 6,
-                    border: '1px solid #e9ecef'
-                  }}>
-                    {Object.entries(customerDetail.custom_fields).map(([key, value]) => (
-                      <div key={key} style={{ 
-                        display: 'flex', 
-                        justifyContent: 'space-between', 
-                        marginBottom: 4,
-                        fontSize: '14px'
-                      }}>
-                        <span style={{ fontWeight: '500', color: '#495057' }}>{key}:</span>
-                        <span style={{ color: '#6c757d' }}>{String(value)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* 新增：Customer ID */}
-              <div style={{ marginTop: 12 }}>
-                <div style={{ marginBottom: 8 }}><strong>Customer ID</strong></div>
-                <div style={{ 
-                  padding: 8, 
-                  background: '#f8f9fa', 
-                  borderRadius: 6,
-                  fontFamily: 'monospace',
-                  fontSize: '12px',
-                  color: '#6c757d',
+                  background: 'white',
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 16,
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
                   border: '1px solid #e9ecef'
                 }}>
-                  {customerDetail?.id}
+                  <div style={{ 
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: '#495057',
+                    marginBottom: 16,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                    borderBottom: '2px solid #0088cc',
+                    paddingBottom: 8
+                  }}>
+                    💬 联系渠道
+                  </div>
+                  
+                  <div>
+                    <label style={{ 
+                      display: 'block',
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: '#6c757d',
+                      marginBottom: 6
+                    }}>
+                      ✈️ Telegram Chat ID
+                    </label>
+                    <div style={{ 
+                      padding: '10px 12px',
+                      background: 'linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%)',
+                      borderRadius: 6,
+                      fontFamily: 'monospace',
+                      fontSize: '14px',
+                      color: '#0088cc',
+                      fontWeight: 600,
+                      border: '1px solid #7dd3fc',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8
+                    }}>
+                      <span style={{ flex: 1 }}>{customerDetail.telegram_chat_id}</span>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(customerDetail.telegram_chat_id)
+                          alert('✅ 已复制到剪贴板')
+                        }}
+                        style={{
+                          background: 'white',
+                          border: '1px solid #0088cc',
+                          borderRadius: 4,
+                          padding: '4px 8px',
+                          cursor: 'pointer',
+                          fontSize: 12
+                        }}
+                      >
+                        📋 复制
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 自定义字段卡片 */}
+              <div style={{ 
+                background: 'white',
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ 
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: '#495057',
+                  marginBottom: 16,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  borderBottom: '2px solid #8b5cf6',
+                  paddingBottom: 8,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <span>🏷️ 自定义字段</span>
+                  {isEditing && (
+                    <button
+                      onClick={() => {
+                        const key = prompt('输入字段名称:')
+                        if (!key) return
+                        const value = prompt('输入字段值:')
+                        if (value === null) return
+                        setCustomFieldsValue({ ...customFieldsValue, [key]: value })
+                      }}
+                      style={{
+                        background: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '4px 8px',
+                        fontSize: 11,
+                        cursor: 'pointer',
+                        fontWeight: 600
+                      }}
+                    >
+                      ➕ 添加字段
+                    </button>
+                  )}
+                </div>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {Object.keys(customFieldsValue).length > 0 ? (
+                    Object.entries(customFieldsValue).map(([key, value]) => (
+                      <div key={key} style={{ marginBottom: 8 }}>
+                        <div style={{ 
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: '#7c3aed',
+                          marginBottom: 4,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.5px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <span>{key}</span>
+                          {isEditing && (
+                            <button
+                              onClick={() => {
+                                const newFields = { ...customFieldsValue }
+                                delete newFields[key]
+                                setCustomFieldsValue(newFields)
+                              }}
+                              style={{
+                                background: '#dc3545',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: 4,
+                                padding: '2px 6px',
+                                fontSize: 10,
+                                cursor: 'pointer'
+                              }}
+                              title="删除字段"
+                            >
+                              ✕
+                            </button>
+                          )}
+                        </div>
+                        {isEditing ? (
+                          <input
+                            value={String(value)}
+                            onChange={(e) => setCustomFieldsValue({ ...customFieldsValue, [key]: e.target.value })}
+                            style={{
+                              width: '100%',
+                              padding: '8px 12px',
+                              border: '2px solid #8b5cf6',
+                              borderRadius: 6,
+                              fontSize: 14,
+                              backgroundColor: 'white'
+                            }}
+                          />
+                        ) : (
+                          <div style={{ 
+                            padding: '10px 12px',
+                            background: 'linear-gradient(135deg, #faf5ff 0%, #f3e8ff 100%)',
+                            borderRadius: 6,
+                            border: '1px solid #e9d5ff',
+                            fontSize: 14,
+                            color: '#6b21a8',
+                            fontWeight: 500
+                          }}>
+                            {String(value)}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <div style={{
+                      textAlign: 'center',
+                      padding: '20px',
+                      color: '#9ca3af',
+                      fontSize: 13
+                    }}>
+                      {isEditing ? '点击"添加字段"按钮添加自定义字段' : '暂无自定义字段'}
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {/* 系统信息卡片 */}
+              <div style={{ 
+                background: 'white',
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 16,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                border: '1px solid #e9ecef'
+              }}>
+                <div style={{ 
+                  fontSize: 13,
+                  fontWeight: 700,
+                  color: '#495057',
+                  marginBottom: 16,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  borderBottom: '2px solid #6b7280',
+                  paddingBottom: 8
+                }}>
+                  🔧 系统信息
+                </div>
+                
+                <div>
+                  <label style={{ 
+                    display: 'block',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: '#6c757d',
+                    marginBottom: 6
+                  }}>
+                    🆔 客户 ID
+                  </label>
+                  <div style={{ 
+                    padding: '10px 12px',
+                    background: '#f9fafb',
+                    borderRadius: 6,
+                    fontFamily: 'monospace',
+                    fontSize: '12px',
+                    color: '#6b7280',
+                    border: '1px solid #e5e7eb',
+                    wordBreak: 'break-all'
+                  }}>
+                    {customerDetail?.id}
+                  </div>
+                </div>
+              </div>
+                </>
+              )}
+
+              {/* 备注标签页 */}
+              {activeTab === 'notes' && (
+                <div style={{ 
+                  background: 'white',
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 16,
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                  border: '1px solid #e9ecef'
+                }}>
+                  <div style={{ 
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: '#495057',
+                    marginBottom: 16,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                    borderBottom: '2px solid #f59e0b',
+                    paddingBottom: 8
+                  }}>
+                    📝 客户备注
+                  </div>
+                  
+                  <textarea
+                    value={notesValue}
+                    onChange={(e) => setNotesValue(e.target.value)}
+                    placeholder="在此添加客户备注..."
+                    style={{
+                      width: '100%',
+                      minHeight: 200,
+                      padding: '12px',
+                      border: '1px solid #dee2e6',
+                      borderRadius: 8,
+                      fontSize: 14,
+                      fontFamily: 'inherit',
+                      resize: 'vertical',
+                      lineHeight: '1.6'
+                    }}
+                  />
+                  
+                  <div style={{ 
+                    display: 'flex', 
+                    gap: 8, 
+                    marginTop: 12 
+                  }}>
+                    <button
+                      onClick={async () => {
+                        if (!customerDetail) return
+                        try {
+                          const res = await fetch(`${API_BASE}/api/customers/${customerDetail.id}`, {
+                            method: 'PATCH',
+                            headers: getAuthHeaders(),
+                            body: JSON.stringify({ notes: notesValue })
+                          })
+                          if (!res.ok) throw new Error('Failed')
+                          setCustomerDetail({ ...customerDetail, notes: notesValue })
+                          mutateCustomers()
+                          alert('✅ 备注已保存')
+                        } catch (err) {
+                          console.error(err)
+                          alert('❌ 保存失败')
+                        }
+                      }}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                        fontSize: 14
+                      }}
+                    >
+                      ✅ 保存备注
+                    </button>
+                    <button
+                      onClick={() => setNotesValue(customerDetail?.notes || '')}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        background: '#6c757d',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                        fontSize: 14
+                      }}
+                    >
+                      ❌ 取消
+                    </button>
+                  </div>
+                </div>
+              )}
 
             </div>
           ) : (
-            <div>Select a customer to see details</div>
+            <div style={{ 
+              height: '100%', 
+              display: 'flex', 
+              flexDirection: 'column',
+              alignItems: 'center', 
+              justifyContent: 'center',
+              padding: 40,
+              textAlign: 'center'
+            }}>
+              <div style={{
+                fontSize: 64,
+                marginBottom: 16,
+                opacity: 0.3
+              }}>
+                👤
+              </div>
+              <div style={{
+                fontSize: 16,
+                fontWeight: 600,
+                color: '#6b7280',
+                marginBottom: 8
+              }}>
+                未选择客户
+              </div>
+              <div style={{
+                fontSize: 14,
+                color: '#9ca3af'
+              }}>
+                从左侧选择一个客户<br />查看详细信息
+              </div>
+            </div>
           )}
-        </DetailsPanel>
+        </div>
       </div>
+
+      {/* 右键菜单 */}
+      {contextMenu && (
+        <div
+          style={{
+            position: 'fixed',
+            top: contextMenu.y,
+            left: contextMenu.x,
+            background: 'white',
+            borderRadius: 8,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            border: '1px solid #e9ecef',
+            zIndex: 9999,
+            minWidth: 150,
+            overflow: 'hidden'
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            onClick={() => {
+              if (contextMenu.type === 'customer') {
+                deleteCustomer(contextMenu.id as string)
+              } else {
+                deleteMessage(contextMenu.id as number)
+              }
+              setContextMenu(null)
+            }}
+            style={{
+              padding: '12px 16px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              transition: 'background 0.2s ease',
+              fontSize: 14,
+              fontWeight: 500
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = '#fee2e2'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent'
+            }}
+          >
+            <span style={{ fontSize: 16 }}>🗑️</span>
+            <span style={{ color: '#dc3545' }}>
+              {contextMenu.type === 'customer' ? '删除客户' : '删除消息'}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

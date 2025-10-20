@@ -1,0 +1,102 @@
+{
+  "name": "测试CustomAPI智能变量",
+  "description": "测试CustomAPI节点的智能变量功能",
+  "nodes": [
+    {
+      "id": "trigger_test_api",
+      "type": "MessageTrigger",
+      "position": {"x": 100, "y": 100},
+      "data": {
+        "triggerType": "message",
+        "config": {
+          "channel": "whatsapp",
+          "match_key": "phone"
+        },
+        "label": "消息触发器",
+        "description": "等待WhatsApp消息"
+      }
+    },
+    {
+      "id": "customapi_test",
+      "type": "CustomAPI",
+      "position": {"x": 400, "y": 100},
+      "data": {
+        "label": "测试API调用",
+        "description": "调用httpbin测试智能变量",
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"customer_name\": \"{{var_name}}\", \"phone_last_4\": \"{{var_phone}}\", \"raw_phone\": \"{{trigger.phone}}\", \"raw_name\": \"{{trigger.name}}\"}",
+        "smart_variables": {
+          "var_name": {
+            "display_name": "客户姓名（首字）",
+            "source": "{{trigger.name}}",
+            "transformer": "First Word",
+            "description": "提取客户名字的第一个词"
+          },
+          "var_phone": {
+            "display_name": "电话后4位",
+            "source": "{{trigger.phone}}",
+            "transformer": "Last 4 Digits",
+            "description": "提取电话号码的后4位"
+          }
+        },
+        "auth": {},
+        "timeout": 10,
+        "retry_count": 0,
+        "response_mapping": {
+          "data_field": "json"
+        }
+      }
+    },
+    {
+      "id": "template_result",
+      "type": "Template",
+      "position": {"x": 700, "y": 100},
+      "data": {
+        "label": "显示结果",
+        "description": "显示API调用结果",
+        "message_templates": [
+          {
+            "id": 1,
+            "content": "✅ API测试成功！\n\n收到的数据：\n客户名: {{api.response.data.customer_name}}\n电话后4位: {{api.response.data.phone_last_4}}\n原始电话: {{api.response.data.raw_phone}}\n原始姓名: {{api.response.data.raw_name}}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "send_result",
+      "type": "SendWhatsAppMessage",
+      "position": {"x": 1000, "y": 100},
+      "data": {
+        "label": "发送结果",
+        "description": "发送测试结果"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge1",
+      "source": "trigger_test_api",
+      "target": "customapi_test",
+      "sourceHandle": "out"
+    },
+    {
+      "id": "edge2",
+      "source": "customapi_test",
+      "target": "template_result",
+      "sourceHandle": "out"
+    },
+    {
+      "id": "edge3",
+      "source": "template_result",
+      "target": "send_result",
+      "sourceHandle": "out"
+    }
+  ],
+  "is_active": true
+}
+
+

@@ -24,6 +24,8 @@ import api from '../utils/api'
 import { useRouter } from 'next/router'
 import MessageEventService from '../services/MessageEventService'
 import NodeSelector from './NodeSelector'
+import NodePalette from './NodePalette'
+import ContextMenu from './ContextMenu'
 
 // 基础节点样式
 const nodeBaseStyle = {
@@ -115,6 +117,8 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
   const [isSaving, setIsSaving] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const [showNodePalette, setShowNodePalette] = useState(true) // 侧边栏默认展开
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
 
   // 清理不可序列化字段（移动到组件作用域，供多个保存点复用）
   const cleanForSend = useCallback((obj: any) => {
@@ -229,7 +233,17 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
   const onPaneClick = useCallback(() => {
     setSelectedNode(null)
     setShowNodePanel(false)
+    setContextMenu(null) // 关闭右键菜单
   }, [])
+
+  const onPaneContextMenu = useCallback((event: React.MouseEvent) => {
+    if (!isEditMode) return;
+    event.preventDefault();
+    setContextMenu({
+      x: event.clientX,
+      y: event.clientY
+    });
+  }, [isEditMode])
 
   const handleAddTrigger = () => {
     setShowTriggerSelector(true)
@@ -757,16 +771,23 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
               </div>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                 <button
-                  onClick={handleAddTrigger}
-                  className="toolbar-button primary"
+                  onClick={() => setShowNodePalette(!showNodePalette)}
+                  className={showNodePalette ? "toolbar-button active" : "toolbar-button"}
+                  title={showNodePalette ? "隐藏节点面板" : "显示节点面板"}
                 >
-                  + 添加触发器
+                  {showNodePalette ? '📦 隐藏面板' : '📦 显示面板'}
+                </button>
+                <button
+                  onClick={handleAddTrigger}
+                  className="toolbar-button"
+                >
+                  + 触发器
                 </button>
                 <button
                   onClick={() => setShowNodeSelector(true)}
                   className="toolbar-button"
                 >
-                  + 添加节点
+                  + 节点
                 </button>
                 <input
                   type="file"
@@ -813,12 +834,6 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
               gap: '8px'
             }}>
               <span>点击"编辑"按钮开始编辑工作流</span>
-              {!isTestMode && <span style={{ 
-                backgroundColor: '#EDF2F7',
-                padding: '4px 8px',
-                borderRadius: '4px',
-                fontSize: '12px'
-              }}>提示: 编辑模式下可以拖拽节点和添加连接</span>}
             </div>
           )}
           
@@ -1072,6 +1087,15 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
 
       {/* 工作流画布 */}
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+        {/* 侧边栏节点面板 */}
+        {isEditMode && (
+          <NodePalette
+            onAddNode={addNode}
+            onAddTrigger={handleAddTrigger}
+            isCollapsed={!showNodePalette}
+          />
+        )}
+
         <ReactFlow
           style={{ background: 'linear-gradient(180deg, #fbfdff, #ffffff)' }}
           nodes={nodes.map(node => ({
@@ -1118,6 +1142,7 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
           onConnect={onConnect}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}
+          onPaneContextMenu={onPaneContextMenu}
           nodeTypes={useMemo(() => ({
             MessageTrigger: TriggerNode,
             TimeTrigger: TimeTriggerNode,
@@ -1256,6 +1281,28 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
 
           {/* 隐藏的原生控制按钮，用于触发缩放功能 */}
           <Controls style={{ display: 'none' }} />
+
+          {/* 编辑模式提示 */}
+          {isEditMode && nodes.length === 0 && (
+            <Panel position="top-center" style={{ 
+              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              color: 'white',
+              padding: '16px 24px',
+              borderRadius: '12px',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              marginTop: '20px',
+              zIndex: 5
+            }}>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '16px', fontWeight: 500, marginBottom: '8px' }}>
+                  🚀 开始创建你的工作流
+                </div>
+                <div style={{ fontSize: '13px', opacity: 0.9 }}>
+                  💡 侧边栏点击节点 | 🖱️ 右键画布快速添加 | ⌨️ 拖拽节点连接
+                </div>
+              </div>
+            </Panel>
+          )}
         </ReactFlow>
 
         {/* 节点配置面板 */}
@@ -1288,23 +1335,21 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
 
         {/* 触发器选择器 */}
         {showTriggerSelector && (
-          <div style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.5)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000
-          }}>
-            <TriggerSelector
-              onSelect={handleTriggerSelect}
-              onClose={() => setShowTriggerSelector(false)}
-            />
-          </div>
+          <TriggerSelector
+            onSelect={handleTriggerSelect}
+            onClose={() => setShowTriggerSelector(false)}
+          />
+        )}
+
+        {/* 右键菜单 */}
+        {contextMenu && (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            onAddNode={addNode}
+            onAddTrigger={handleAddTrigger}
+          />
         )}
       </div>
 
@@ -1352,6 +1397,11 @@ export default function WorkflowEditor({ workflow, onSave, onClose }: WorkflowEd
 
         .toolbar-button.danger:hover {
           background-color: #e53e3e;
+        }
+
+        .toolbar-button.active {
+          background-color: #edf2f7;
+          border-color: #cbd5e0;
         }
 
         /* React Flow Controls 样式 */

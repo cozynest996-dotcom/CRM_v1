@@ -31,6 +31,7 @@ from app.db.models import (
     Workflow, WorkflowExecution, WorkflowStepExecution, 
     Customer, Message, AIAnalysis, AuditLog, CustomEntityRecord # 导入 CustomEntityRecord
 )
+from app.db import models
 from app.services.ai_service import AIService
 from app.services.whatsapp import WhatsAppService
 import pytz
@@ -342,6 +343,15 @@ class MessageTriggerProcessor(NodeProcessor):
         # 从触发数据中获取消息信息
         trigger_data = self.context.get("trigger_data", {})
         
+        # 🔍 检查触发类型 - 如果是 DB Trigger，跳过此 MessageTrigger 节点
+        trigger_type = trigger_data.get("trigger_type", "message")
+        
+        if trigger_type in ("db_change", "db_scheduled"):
+            print(f"🔍 MessageTrigger 检测到 DB Trigger 类型 ({trigger_type})，跳过此节点")
+            # DB Trigger 不应该执行 MessageTrigger 节点，直接返回空结果
+            # 工作流引擎会自动跳到下一个节点
+            return {}
+        
         # 🆕 添加渠道匹配验证：只有当触发渠道与节点配置渠道匹配时才继续执行
         trigger_channel = trigger_data.get("channel", "whatsapp")
         
@@ -472,7 +482,8 @@ class DbTriggerProcessor(NodeProcessor):
         trigger_data = self.context.get("trigger_data", {})
         
         # 验证触发数据是否为数据库变化事件
-        if trigger_data.get("type") != "db_change":
+        trigger_type = trigger_data.get("trigger_type", "")
+        if trigger_data.get("type") != "db_change" and trigger_type not in ["db_change", "db_scheduled"]:
             raise ValueError(f"DbTrigger requires db_change trigger type, got: {trigger_data.get('type')}")
         
         # 验证表名匹配
@@ -483,13 +494,173 @@ class DbTriggerProcessor(NodeProcessor):
         if trigger_data.get("field") != field:
             raise ValueError(f"Field mismatch: trigger field '{trigger_data.get('field')}' does not match node field '{field}'")
         
-        # 获取字段的新值和旧值
-        new_value = trigger_data.get("new_value", "")
-        old_value = trigger_data.get("old_value", "")
+        # 检查触发模式
+        is_scheduled = trigger_data.get("scheduled", False)
+        is_immediate = trigger_data.get("immediate", False)
         
-        print(f"  触发数据:")
-        print(f"    新值: {new_value}")
-        print(f"    旧值: {old_value}")
+        # 🔧 修复：初始化 new_value 和 old_value 变量
+        new_value = ""
+        old_value = ""
+        
+        if is_scheduled:
+            # 定时触发：查询数据库中符合条件的所有记录
+            print(f"  📅 定时触发模式：查询符合条件的所有客户")
+            
+            user_id = trigger_data.get("user_id")
+            if not user_id:
+                raise ValueError("Scheduled DbTrigger requires user_id")
+            
+            # 检查是否开启去重
+            prevent_duplicate = node_config_inner.get("prevent_duplicate_triggers", True)
+            schedule_config = node_config_inner.get("schedule", {})
+            interval = schedule_config.get("interval", 300)  # 默认5分钟
+            
+            # 生成触发配置的哈希值（用于追踪）
+            import hashlib
+            import json
+            config_hash = hashlib.md5(
+                json.dumps({
+                    "table": table,
+                    "field": field,
+                    "condition": condition,
+                    "value": value
+                }, sort_keys=True).encode()
+            ).hexdigest()
+            
+            # 构建查询条件
+            query = self.db.query(models.Customer).filter(
+                models.Customer.user_id == user_id
+            )
+            
+            if condition == "equals":
+                if field == "stage_id":
+                    query = query.filter(models.Customer.stage_id == int(value))
+                else:
+                    query = query.filter(getattr(models.Customer, field) == value)
+            elif condition == "not_equals":
+                if field == "stage_id":
+                    query = query.filter(models.Customer.stage_id != int(value))
+                else:
+                    query = query.filter(getattr(models.Customer, field) != value)
+            
+            matching_customers = query.all()
+            print(f"  📊 找到 {len(matching_customers)} 个符合条件的客户")
+            
+            # 🆕 去重过滤：移除最近已触发的客户
+            if prevent_duplicate and matching_customers:
+                from datetime import datetime, timedelta
+                
+                workflow_id = self.context.get("workflow_id")
+                cutoff_time = datetime.utcnow() - timedelta(seconds=interval)
+                
+                # 查询最近触发过的客户ID
+                recent_executions = self.db.query(models.DbTriggerExecution).filter(
+                    models.DbTriggerExecution.workflow_id == workflow_id,
+                    models.DbTriggerExecution.trigger_config_hash == config_hash,
+                    models.DbTriggerExecution.executed_at >= cutoff_time
+                ).all()
+                
+                recently_triggered_ids = {exec.customer_id for exec in recent_executions}
+                
+                # 过滤掉已触发的客户
+                original_count = len(matching_customers)
+                matching_customers = [
+                    c for c in matching_customers 
+                    if str(c.id) not in recently_triggered_ids
+                ]
+                
+                filtered_count = original_count - len(matching_customers)
+                if filtered_count > 0:
+                    print(f"  🚫 去重过滤：跳过 {filtered_count} 个最近已触发的客户")
+                print(f"  ✅ 剩余 {len(matching_customers)} 个客户待触发")
+            
+            # 为每个匹配的客户设置上下文
+            if matching_customers:
+                # 使用第一个客户作为主要上下文，其他客户存储在列表中
+                primary_customer = matching_customers[0]
+                
+                # 🔧 修复：为定时触发设置 new_value 和 old_value
+                if field == "stage_id":
+                    new_value = str(primary_customer.stage_id)
+                    old_value = str(primary_customer.stage_id)  # 定时触发时，新旧值相同
+                else:
+                    field_value = getattr(primary_customer, field, "")
+                    new_value = str(field_value)
+                    old_value = str(field_value)
+                
+                print(f"  📅 定时触发模式：检查字段 {field} 当前值: {new_value}")
+                
+                # 🔧 修复：使用 context.db 存储 customer 对象（与 MessageTriggerProcessor 保持一致）
+                self.context.db["customer"] = primary_customer
+                
+                # 同时也存储序列化的客户信息到 variables（用于日志和调试）
+                self.context.set("customer", {
+                    "id": str(primary_customer.id),
+                    "name": primary_customer.name,
+                    "phone": primary_customer.phone,
+                    "email": primary_customer.email,
+                    "stage_id": primary_customer.stage_id,
+                    "custom_fields": primary_customer.custom_fields or {}
+                })
+                
+                # 存储所有匹配的客户
+                self.context.set("matching_customers", [
+                    {
+                        "id": c.id,
+                        "name": c.name,
+                        "phone": c.phone,
+                        "email": c.email,
+                        "stage_id": c.stage_id,
+                        "custom_fields": c.custom_fields or {}
+                    } for c in matching_customers
+                ])
+                
+                print(f"  📊 已加载客户数据: {primary_customer.name} 等 {len(matching_customers)} 个客户")
+            else:
+                # 🔧 修复：没有匹配客户时，设置默认值
+                new_value = ""
+                old_value = ""
+                print(f"  ⚠️ 没有找到符合条件的客户")
+            
+        elif is_immediate:
+            # 即时触发：处理单个客户的字段变化
+            customer_id = trigger_data.get("customer_id")
+            new_value = trigger_data.get("new_value", "")
+            old_value = trigger_data.get("old_value", "")
+            
+            print(f"  ⚡ 即时触发模式:")
+            print(f"    客户ID: {customer_id}")
+            print(f"    新值: {new_value}")
+            print(f"    旧值: {old_value}")
+            
+            # 加载客户数据到上下文
+            if customer_id:
+                customer = self.db.query(models.Customer).filter(
+                    models.Customer.id == customer_id
+                ).first()
+                if customer:
+                    # 🔧 修复：使用 context.db 存储 customer 对象（与 MessageTriggerProcessor 保持一致）
+                    self.context.db["customer"] = customer
+                    
+                    # 同时也存储序列化的客户信息到 variables（用于日志和调试）
+                    self.context.set("customer", {
+                        "id": str(customer.id),
+                        "name": customer.name,
+                        "phone": customer.phone,
+                        "email": customer.email,
+                        "stage_id": customer.stage_id,
+                        "custom_fields": customer.custom_fields or {}
+                    })
+                    print(f"  📊 已加载客户数据: {customer.name}")
+            
+        else:
+            # 兼容旧的实时触发：使用传入的新值和旧值
+            new_value = trigger_data.get("new_value", "")
+            old_value = trigger_data.get("old_value", "")
+            
+            print(f"  🔄 兼容模式:")
+            print(f"    新值: {new_value}")
+            print(f"    旧值: {old_value}")
         
         # 根据条件检查是否满足触发条件
         trigger_matched = self._check_condition(condition, new_value, value)
@@ -505,9 +676,12 @@ class DbTriggerProcessor(NodeProcessor):
             from app.db.models import Customer
             customer = self.db.query(Customer).filter(Customer.id == customer_id).first()
             if customer:
-                # 将客户数据添加到上下文
+                # 🔧 修复：使用 context.db 存储 customer 对象（与 MessageTriggerProcessor 保持一致）
+                self.context.db["customer"] = customer
+                
+                # 将客户数据添加到上下文（用于日志和调试）
                 customer_data = {
-                    "id": customer.id,
+                    "id": str(customer.id),
                     "name": customer.name,
                     "phone": customer.phone,
                     "email": customer.email,
@@ -1649,6 +1823,8 @@ class UpdateDBProcessor(NodeProcessor):
 
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         """执行数据库更新"""
+        logger.info(f"\n🔄 UpdateDB 节点开始执行...")
+        logger.info(f"  节点配置: {node_config}")
         print(f"\n🔄 UpdateDB 节点开始执行...")
         print(f"  节点配置: {node_config}")
         
@@ -1673,55 +1849,157 @@ class UpdateDBProcessor(NodeProcessor):
             # 首先尝试从上下文获取客户（MessageTrigger 已经设置）
             customer = self.context.db.get("customer", None)
             
+            # 获取必要的识别信息
+            phone = trigger_data.get("phone")
+            chat_id = trigger_data.get("chat_id")
+            user_id = trigger_data.get("user_id") or self.context.get("user_id") # 确保 user_id 可用
+
+            if not user_id:
+                raise ValueError("User ID is required for UpdateDBProcessor")
+
             if not customer:
                 # 根据触发器数据智能匹配
-                phone = trigger_data.get("phone")
-                chat_id = trigger_data.get("chat_id")
-                user_id = trigger_data.get("user_id")
-                
                 print(f"  触发器数据: phone={phone}, chat_id={chat_id}, user_id={user_id}")
                 
-                if phone and user_id:
+                if phone:
                     # WhatsApp 触发器 - 使用手机号匹配
-                    customer = self.db.query(Customer).filter(
-                        Customer.phone == phone,
-                        Customer.user_id == user_id
+                    customer = self.db.query(models.Customer).filter(
+                        models.Customer.phone == phone,
+                        models.Customer.user_id == user_id
                     ).first()
                     print(f"  通过手机号匹配客户: {customer.name if customer else 'Not Found'}")
                     
-                elif chat_id and user_id:
+                if not customer and chat_id: # 如果按手机号没找到，尝试按 Telegram chat_id
                     # Telegram 触发器 - 使用聊天ID匹配
-                    customer = self.db.query(Customer).filter(
-                        Customer.telegram_chat_id == str(chat_id),
-                        Customer.user_id == user_id
+                    customer = self.db.query(models.Customer).filter(
+                        models.Customer.telegram_chat_id == str(chat_id),
+                        models.Customer.user_id == user_id
                     ).first()
                     print(f"  通过聊天ID匹配客户: {customer.name if customer else 'Not Found'}")
                     
-                elif user_id:
-                    # 其他触发器 - 尝试通过用户ID获取最近的客户
-                    customer = self.db.query(Customer).filter(
-                        Customer.user_id == user_id
-                    ).order_by(Customer.updated_at.desc()).first()
+                if not customer: # 如果仍然没有找到客户，尝试通过用户ID获取最近的客户
+                    customer = self.db.query(models.Customer).filter(
+                        models.Customer.user_id == user_id
+                    ).order_by(models.Customer.updated_at.desc()).first()
                     print(f"  通过用户ID匹配最近客户: {customer.name if customer else 'Not Found'}")
             
             if not customer:
-                if error_strategy == "abort_on_error":
-                    raise ValueError("Customer not found")
-                else:
-                    print(f"  ⚠️ 客户未找到，跳过更新")
-                    return {"db.update_result": "customer_not_found"}
+                # 🆕 检查是否启用了创建新客户功能
+                enable_create_customer = node_data.get("enable_create_customer", False)
+                if not enable_create_customer:
+                    print("  ⚠️ 客户未找到，但未启用创建新客户功能，跳过更新")
+                    if error_strategy == "abort_on_error":
+                        raise ValueError("Customer not found and create new customer is disabled")
+                    else:
+                        return {"db.update_result": "customer_not_found_create_disabled"}
+                
+                # 🆕 客户未找到，尝试从触发器数据和 AI 分析创建新客户
+                print("  ⚠️ 客户未找到，启用了创建新客户功能，开始创建新客户")
+                print(f"  🔧 节点配置中的 default_stage_id: {node_data.get('default_stage_id', 'NOT_SET')}")
+                
+                # 从触发器数据中获取基本信息
+                new_customer_data = {
+                    "user_id": user_id,  # 确保新客户关联到正确的用户
+                    "name": trigger_data.get("name", "New Lead"),
+                    "phone": phone,
+                    "telegram_chat_id": str(chat_id) if chat_id else None,
+                    "email": trigger_data.get("email"), # 尝试从触发器数据获取
+                    "stage_id": node_data.get("default_stage_id", 1), # 新线索默认 Stage ID (可配置)
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                    "custom_fields": {} # 初始化自定义字段
+                }
+
+                # 从AI分析中获取更多信息来填充新客户数据
+                ai_analyze_updates = self.context.ai.get("analyze", {}).get("updates", {})
+                print(f"  📊 AI分析结果: {ai_analyze_updates}")
+                for k, v in ai_analyze_updates.items():
+                    # 检查是否是 Customer 模型的直接属性，并且不是已有的基本字段
+                    if hasattr(models.Customer, k) and k not in ["phone", "telegram_chat_id", "email"] and k not in new_customer_data:
+                        new_customer_data[k] = v
+                    elif k.startswith("custom_fields."): # 处理AI提取的自定义字段
+                        cf_key = k.replace("custom_fields.", "")
+                        new_customer_data["custom_fields"][cf_key] = v
+
+                # 如果 name 仍然是默认值，尝试从 AI 获取
+                if new_customer_data["name"] == "New Lead" and ai_analyze_updates.get("name"):
+                    new_customer_data["name"] = ai_analyze_updates["name"]
+
+                print(f"  📝 准备创建新客户数据:")
+                print(f"    - name: {new_customer_data['name']}")
+                print(f"    - phone: {new_customer_data['phone']}")
+                print(f"    - telegram_chat_id: {new_customer_data['telegram_chat_id']}")
+                print(f"    - stage_id: {new_customer_data['stage_id']}")
+                print(f"    - email: {new_customer_data['email']}")
+                print(f"    - custom_fields: {new_customer_data['custom_fields']}")
+
+                # 如果手机号或Telegram ID仍然为空，且设置为 abort_on_error，则报错
+                if (not new_customer_data["phone"] and not new_customer_data["telegram_chat_id"]):
+                    if error_strategy == "abort_on_error":
+                        raise ValueError("Cannot create new customer: missing phone or telegram_chat_id")
+                    else:
+                        print(f"  ⚠️ 无法创建新客户，缺少手机号或Telegram ID，跳过更新")
+                        return {"db.update_result": "failed_to_create_customer"}
+
+                try:
+                    new_customer = models.Customer(**new_customer_data)
+                    self.db.add(new_customer)
+                    self.db.commit()
+                    self.db.refresh(new_customer)
+                    customer = new_customer # 设置为当前客户
+                    print(f"  ✅ 成功创建新客户: {customer.name} (ID: {customer.id})")
+                    total_has_changes = True # 标记为有变更
+                    self.context.db["customer"] = customer # 更新上下文
+                    total_new_values["new_customer_created"] = str(customer.id)
+
+                    # 如果审计日志启用，记录创建事件
+                    if audit_log_enabled:
+                        audit_log = models.AuditLog(
+                            entity_type="customer",
+                            entity_id=customer.id,
+                            action="create",
+                            old_values={}, # 创建时没有旧值
+                            new_values=new_customer_data, # 记录创建时的所有数据
+                            user_id=customer.user_id,
+                            source="workflow"
+                        )
+                        self.db.add(audit_log)
+                        # 注意：审计日志的 commit 应该在主事务 commit 之后，或者用 session.flush()
+                        # 为了简化，这里暂时单独 commit，实际应确保事务一致性
+                        self.db.commit() 
+
+                except Exception as create_e:
+                    print(f"  ❌ 创建新客户失败: {create_e}")
+                    self.db.rollback() # 回滚创建操作
+                    if error_strategy == "abort_on_error":
+                        raise ValueError(f"Failed to create new customer: {create_e}")
+                    else:
+                        print(f"  ⚠️ 创建客户失败，跳过更新")
+                        return {"db.update_result": "failed_to_create_customer"}
             
+            logger.info(f"  找到客户: {customer.name} (ID: {customer.id})")
             print(f"  找到客户: {customer.name} (ID: {customer.id})")
+            print(f"  客户当前 stage_id: {customer.stage_id}")
             
             # 乐观锁检查
             if optimistic_lock and hasattr(customer, 'version'):
                 current_version = customer.version
                 print(f"  当前版本: {current_version}")
             
-            # 收集所有更新
+            # 🔧 先初始化变量
             total_has_changes = False
             total_old_values = {}
             total_new_values = {}
+            
+            # 🔧 修复：如果配置了 default_stage_id，且客户当前 stage_id 不同，则更新
+            default_stage_id = node_data.get("default_stage_id")
+            if default_stage_id is not None and customer.stage_id != default_stage_id:
+                print(f"  🔄 更新客户 stage_id: {customer.stage_id} → {default_stage_id}")
+                old_stage_id = customer.stage_id
+                customer.stage_id = default_stage_id
+                total_has_changes = True
+                total_old_values["stage_id"] = old_stage_id
+                total_new_values["stage_id"] = default_stage_id
             
             # 智能更新（AI 输出）
             if update_mode in ["smart_update", "hybrid"]:
@@ -1752,6 +2030,23 @@ class UpdateDBProcessor(NodeProcessor):
             # 如果没有变更且设置了跳过相同值
             if not total_has_changes and skip_if_equal:
                 print(f"  ✅ 无变更，跳过更新")
+                
+                # 🔧 修复：即使没有数据变更，也检查是否需要触发 DbTrigger
+                enable_db_trigger = node_data.get("enable_db_trigger", True)
+                if enable_db_trigger:
+                    print(f"  🔄 虽然无数据变更，但启用了 DbTrigger，检查是否需要触发...")
+                    # 创建一个虚拟的变更记录来触发 DbTrigger（如果客户的当前状态满足条件）
+                    current_stage_id = getattr(customer, 'stage_id', None)
+                    if current_stage_id is not None:
+                        # 使用当前值作为"新值"来检查 DbTrigger 条件
+                        virtual_new_values = {"stage_id": current_stage_id}
+                        virtual_old_values = {"stage_id": current_stage_id}  # 旧值和新值相同，表示状态检查
+                        await self._trigger_immediate_db_workflows(customer, virtual_new_values, virtual_old_values)
+                    else:
+                        print(f"  ⚠️ 客户没有 stage_id，跳过 DbTrigger 检查")
+                else:
+                    print(f"  ⏸️ DbTrigger 触发已禁用，跳过检查")
+                
                 return {
                     "db.update_result": "no_changes",
                     "db.updated_row": customer,
@@ -1768,16 +2063,21 @@ class UpdateDBProcessor(NodeProcessor):
                 
                 # 记录审计日志
                 if audit_log_enabled:
-                    audit_log = AuditLog(
-                        entity_type="customer",
-                        entity_id=customer.id,
-                        action="update",
-                        old_values=total_old_values,
-                        new_values=total_new_values,
-                        user_id=customer.user_id,
-                        source="workflow"
-                    )
-                    self.db.add(audit_log)
+                    # 如果是创建客户，审计日志已经在上面记录了
+                    if "new_customer_created" not in total_new_values:
+                        audit_log = models.AuditLog(
+                            entity_type="customer",
+                            entity_id=customer.id,
+                            action="update",
+                            old_values=total_old_values,
+                            new_values=total_new_values,
+                            user_id=customer.user_id,
+                            source="workflow"
+                        )
+                        self.db.add(audit_log)
+                        # 注意：审计日志的 commit 应该在主事务 commit 之后，或者用 session.flush()
+                        # 为了简化，这里暂时单独 commit，实际应确保事务一致性
+                        self.db.commit()
             
             self.db.commit()
             print(f"  ✅ 数据库事务已提交。")
@@ -1785,6 +2085,14 @@ class UpdateDBProcessor(NodeProcessor):
             print(f"  ✅ 客户对象已从数据库刷新。最新 custom_fields: {customer.custom_fields}")
             
             print(f"  ✅ 更新完成，新版本: {getattr(customer, 'version', 1)}")
+            
+            # 🚀 触发相关的 DbTrigger 工作流（高性能即时触发）
+            enable_db_trigger = node_data.get("enable_db_trigger", True)  # 默认启用
+            if total_new_values and enable_db_trigger:
+                print(f"  🔄 启用 DbTrigger 检查，开始触发相关工作流...")
+                await self._trigger_immediate_db_workflows(customer, total_new_values, total_old_values)
+            elif not enable_db_trigger:
+                print(f"  ⏸️ DbTrigger 触发已禁用，跳过检查")
             
             return {
                 "db.update_result": "success",
@@ -1811,6 +2119,97 @@ class UpdateDBProcessor(NodeProcessor):
                     "db.update_result": "error",
                     "db.error_message": str(e)
                 }
+    
+    async def _trigger_immediate_db_workflows(self, customer, new_values: dict, old_values: dict):
+        """高性能即时触发 DbTrigger 工作流"""
+        try:
+            print(f"  🚀 检查即时 DbTrigger 触发...")
+            print(f"    客户ID: {customer.id}, 用户ID: {customer.user_id}")
+            print(f"    新值: {new_values}")
+            print(f"    旧值: {old_values}")
+            
+            # 获取所有活跃的工作流
+            workflows = self.db.query(models.Workflow).filter(
+                models.Workflow.is_active == True,
+                models.Workflow.user_id == customer.user_id
+            ).all()
+            
+            print(f"    找到 {len(workflows)} 个活跃工作流")
+            
+            for workflow in workflows:
+                try:
+                    nodes = workflow.nodes or []
+                    print(f"    检查工作流: {workflow.name} (ID: {workflow.id})")
+                    
+                    # 查找 DbTrigger 节点
+                    for node in nodes:
+                        if node.get("type") == "DbTrigger":
+                            node_data = node.get("data", {})
+                            config = node_data.get("config", {})
+                            
+                            table = config.get("table", "customers")
+                            field = config.get("field")
+                            condition = config.get("condition", "equals")
+                            expected_value = config.get("value", "")
+                            
+                            print(f"      发现 DbTrigger: table={table}, field={field}, condition={condition}, value={expected_value}")
+                            
+                            if table != "customers" or not field:
+                                continue
+                                
+                            # 检查字段是否发生了变化
+                            if field in new_values:
+                                new_field_value = str(new_values[field])
+                                old_field_value = str(old_values.get(field, ""))
+                                
+                                print(f"    🔍 检查字段 {field}: {old_field_value} → {new_field_value}")
+                                
+                                # 检查是否满足触发条件
+                                should_trigger = False
+                                is_status_check = (new_field_value == old_field_value)  # 状态检查模式
+                                
+                                if condition == "equals" and new_field_value == str(expected_value):
+                                    should_trigger = True
+                                    if is_status_check:
+                                        print(f"    🔍 状态检查模式：当前值 {new_field_value} 满足条件 equals {expected_value}")
+                                elif condition == "not_equals" and new_field_value != str(expected_value):
+                                    should_trigger = True
+                                    if is_status_check:
+                                        print(f"    🔍 状态检查模式：当前值 {new_field_value} 满足条件 not_equals {expected_value}")
+                                elif condition == "changed" and new_field_value != old_field_value:
+                                    should_trigger = True
+                                    # 注意：changed 条件在状态检查模式下不会触发，因为值没有变化
+                                
+                                if should_trigger:
+                                    print(f"    ⚡ 即时触发 DbTrigger 工作流: {workflow.name} (ID: {workflow.id})")
+                                    
+                                    # 创建数据库变化触发数据
+                                    db_trigger_data = {
+                                        "trigger_type": "db_change",
+                                        "type": "db_change",
+                                        "table": table,
+                                        "field": field,
+                                        "condition": condition,
+                                        "value": expected_value,
+                                        "new_value": new_field_value,
+                                        "old_value": old_field_value,
+                                        "customer_id": customer.id,
+                                        "user_id": customer.user_id,
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "immediate": True
+                                    }
+                                    
+                                    # 执行 DbTrigger 工作流
+                                    from app.services.workflow_engine import WorkflowEngine
+                                    workflow_engine = WorkflowEngine(self.db)
+                                    await workflow_engine.execute_workflow(workflow.id, db_trigger_data)
+                                    
+                except Exception as e:
+                    print(f"    ❌ 检查工作流 {workflow.id} 时出错: {e}")
+                    continue
+                    
+        except Exception as e:
+            print(f"  ❌ 即时触发 DbTrigger 工作流时出错: {e}")
 
 class DelayProcessor(NodeProcessor):
     """延迟节点 - 控制工作时段和限频"""
@@ -2696,6 +3095,9 @@ class TemplateProcessor(NodeProcessor):
             print(f"  媒体文件数量: {len(media_list)}")
             print(f"  媒体发送模式: {media_send_mode}")
             
+            # 🆕 将node_data存储到上下文中，以便_apply_template_variables访问智能变量配置
+            self.context.set("_current_node_data", node_data)
+            
             # 处理多条消息模板
             processed_messages = []
             for i, template in enumerate(message_templates):
@@ -2844,20 +3246,66 @@ class TemplateProcessor(NodeProcessor):
         ai_data = self.context.get("ai", {})
         return str(ai_data.get(field, ""))
     
+    def _apply_smart_variable_transformer(self, value: str, transformer: str) -> str:
+        """应用智能变量转换器"""
+        if not value or not transformer:
+            return value
+        
+        try:
+            if transformer == "Last 4 Digits":
+                # 提取最后4位数字
+                digits = ''.join(filter(str.isdigit, str(value)))
+                return digits[-4:] if len(digits) >= 4 else digits
+            elif transformer == "First Word":
+                # 提取第一个单词
+                words = str(value).split()
+                return words[0] if words else value
+            elif transformer == "Uppercase":
+                return str(value).upper()
+            elif transformer == "Lowercase":
+                return str(value).lower()
+            elif transformer == "Capitalize":
+                return str(value).capitalize()
+            else:
+                # 未知转换器，返回原值
+                return value
+        except Exception as e:
+            logger.error(f"智能变量转换器失败 ({transformer}): {e}")
+            return value
+    
     def _apply_template_variables(self, template: str) -> str:
-        """应用模板变量替换 - 新版本"""
+        """应用模板变量替换 - 新版本，支持智能变量"""
         if not template:
             return ""
         
         import re
         
+        # 🆕 获取智能变量配置
+        node_data = self.context.get("_current_node_data", {})
+        smart_variables = node_data.get("smart_variables", {})
+        
         def replace_variable(match):
-            var_expr = match.group(0)  # 完整的 {{trigger.name}} 表达式
+            var_expr = match.group(0)  # 完整的 {{trigger.name}} 或 {{var_1}} 表达式
             try:
                 # 去掉 {{ }}
                 inner_expr = var_expr[2:-2].strip()
                 
-                if inner_expr.startswith("trigger."):
+                # 🆕 检查是否为智能变量 (var_1, var_2, etc.)
+                if inner_expr.startswith("var_") and inner_expr in smart_variables:
+                    smart_var_config = smart_variables[inner_expr]
+                    source = smart_var_config.get("source", "")
+                    transformer = smart_var_config.get("transformer", "")
+                    
+                    # 首先解析source（它可能是 {{trigger.phone}} 这样的变量）
+                    source_value = self._apply_template_variables(source) if source.startswith("{{") else source
+                    
+                    # 然后应用transformer
+                    final_value = self._apply_smart_variable_transformer(source_value, transformer)
+                    
+                    print(f"    🔧 智能变量 {var_expr}: '{source}' → '{source_value}' → [转换:{transformer}] → '{final_value}'")
+                    return final_value
+                
+                elif inner_expr.startswith("trigger."):
                     field = inner_expr[8:]  # 去掉 "trigger."
                     trigger_data = self.context.get("trigger_data", {})
                     
@@ -3520,7 +3968,9 @@ class SendTelegramMessageProcessor(NodeProcessor):
                 if value is not None:
                     print(f"    - Resolved from trigger: {var_path} -> {value}")
                     return str(value)
-
+                else:
+                    print(f"       ❌ trigger 中未找到: {var_path}")
+            
             # 2. 尝试 'actor' 相关变量
             if var_path.startswith("actor."):
                 actor_data = self.context.get("actor", {})
@@ -3944,6 +4394,44 @@ class SendMessageProcessor(NodeProcessor):
 
 class CustomAPIProcessor(NodeProcessor):
     """自定义 API 调用节点"""
+    
+    def _apply_transformer(self, value: str, transformer: str) -> str:
+        """应用智能变量转换器"""
+        if not value or not transformer or transformer == "None":
+            return value
+        
+        try:
+            if transformer == "Last 4 Digits":
+                # 提取最后4位数字
+                digits = ''.join(filter(str.isdigit, str(value)))
+                return digits[-4:] if len(digits) >= 4 else digits
+            elif transformer == "First Word":
+                # 提取第一个单词
+                words = str(value).split()
+                return words[0] if words else value
+            elif transformer == "Uppercase":
+                return str(value).upper()
+            elif transformer == "Lowercase":
+                return str(value).lower()
+            elif transformer == "Capitalize":
+                return str(value).capitalize()
+            elif transformer == "Extract Email":
+                # 提取邮箱地址
+                import re
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                match = re.search(email_pattern, str(value))
+                return match.group(0) if match else value
+            elif transformer == "Extract Phone":
+                # 提取电话号码（数字）
+                digits = ''.join(filter(str.isdigit, str(value)))
+                return digits if digits else value
+            else:
+                # 未知转换器，返回原值
+                logger.warning(f"Unknown transformer: {transformer}")
+                return value
+        except Exception as e:
+            logger.error(f"智能变量转换器失败 ({transformer}): {e}")
+            return value
 
     async def execute(self, node_config: Dict[str, Any]) -> Dict[str, Any]:
         print(f"\n🔧 CustomAPI 节点开始执行...")
@@ -4387,18 +4875,32 @@ class WorkflowEngine:
                 incoming_count[target] = incoming_count.get(target, 0) + 1
                 incoming_count.setdefault(source, incoming_count.get(source, 0))
 
-            # 首先尝试找到 MessageTrigger 类型的节点作为入口
+            # 🔧 根据触发类型选择合适的起始节点
             start_node_id = None
-            for n in workflow.nodes:
-                if n.get('type') == 'MessageTrigger':
-                    start_node_id = n.get('id')
-                    break
+            trigger_type = trigger_data.get("trigger_type", "message")
+            
+            # 根据触发类型选择对应的 Trigger 节点
+            if trigger_type in ("db_change", "db_scheduled"):
+                # DB Trigger：寻找 DbTrigger 节点
+                for n in workflow.nodes:
+                    if n.get('type') == 'DbTrigger':
+                        start_node_id = n.get('id')
+                        print(f"  🎯 DB Trigger 触发，选择 DbTrigger 节点作为起点: {start_node_id}")
+                        break
+            else:
+                # Message Trigger：寻找 MessageTrigger 节点
+                for n in workflow.nodes:
+                    if n.get('type') == 'MessageTrigger':
+                        start_node_id = n.get('id')
+                        print(f"  🎯 Message Trigger 触发，选择 MessageTrigger 节点作为起点: {start_node_id}")
+                        break
 
-            # 如果没有 MessageTrigger，则选入度为 0 的节点
+            # 如果没有找到对应的 Trigger 节点，则选入度为 0 的节点
             if not start_node_id:
                 for nid in nodes_dict.keys():
                     if incoming_count.get(nid, 0) == 0:
                         start_node_id = nid
+                        print(f"  🎯 未找到特定 Trigger 节点，选择入度为 0 的节点: {start_node_id}")
                         break
 
             # 最后回退到第一个 edge 的 source（兼容）
@@ -4507,6 +5009,32 @@ class WorkflowEngine:
                     execution.status = "completed"
                     execution.completed_at = execution_end_time
                     execution.duration_seconds = execution_duration
+                    
+                    # 🆕 如果是定时 DbTrigger 触发，记录执行记录（用于去重）
+                    if trigger_data.get("trigger_type") == "db_scheduled":
+                        customer_id = context.get("customer_id")
+                        if customer_id:
+                            # 生成触发配置哈希
+                            import hashlib
+                            import json
+                            config_hash = hashlib.md5(
+                                json.dumps({
+                                    "table": trigger_data.get("table"),
+                                    "field": trigger_data.get("field"),
+                                    "condition": trigger_data.get("condition"),
+                                    "value": trigger_data.get("value")
+                                }, sort_keys=True).encode()
+                            ).hexdigest()
+                            
+                            # 记录触发执行
+                            db_trigger_exec = models.DbTriggerExecution(
+                                workflow_id=workflow_id,
+                                customer_id=str(customer_id),
+                                trigger_config_hash=config_hash,
+                                executed_at=execution_end_time
+                            )
+                            self.db.add(db_trigger_exec)
+                            print(f"  📝 记录 DbTrigger 执行: workflow_id={workflow_id}, customer_id={customer_id}")
                     
                 logger.info(f"✅ 工作流執行完成 - ID: {workflow_id}, 耗時: {execution_duration:.2f}秒")
                 return execution

@@ -401,3 +401,21 @@ class CustomEntityRecord(Base):
     # 关系
     entity_type = relationship("CustomEntityType", back_populates="records")
     user = relationship("User", backref="custom_entity_records")
+
+# 新增：DbTrigger 触发追踪表（用于防止重复触发）
+class DbTriggerExecution(Base):
+    __tablename__ = "db_trigger_executions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False, index=True)
+    customer_id = Column(String, nullable=False, index=True)  # 触发的客户ID
+    trigger_config_hash = Column(String, nullable=False)  # 触发配置的哈希值（用于识别同一触发条件）
+    executed_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # 关系
+    workflow = relationship("Workflow", backref="db_trigger_executions")
+    
+    __table_args__ = (
+        # 复合索引，用于快速查询特定工作流+客户的最后触发时间
+        UniqueConstraint('workflow_id', 'customer_id', 'trigger_config_hash', 'executed_at', name='_workflow_customer_trigger_time_uc'),
+    )

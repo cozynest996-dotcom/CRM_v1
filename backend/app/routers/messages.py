@@ -675,3 +675,41 @@ async def update_message_ack(data: dict, db: Session = Depends(get_db)):
     print(f"✅ 消息狀態已更新: {message_id} → ack={ack}")
     
     return {"status": "ok", "message_id": message_id, "ack": ack}
+
+# ✅ 删除消息
+@router.delete("/{message_id}")
+async def delete_message(
+    message_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """删除指定的消息"""
+    user_id = current_user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    # 查找消息
+    message = db.query(models.Message).filter(
+        models.Message.id == message_id,
+        models.Message.user_id == user_id
+    ).first()
+    
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    # 如果是未读的入站消息，减少客户的未读计数
+    if message.direction == "inbound" and message.ack < 3:
+        customer = db.query(models.Customer).filter(
+            models.Customer.id == message.customer_id
+        ).first()
+        if customer and customer.unread_count > 0:
+            customer.unread_count -= 1
+            db.add(customer)
+    
+    # 删除消息
+    db.delete(message)
+    db.commit()
+    
+    print(f"✅ 消息已删除: ID={message_id}, 用户={user_id}")
+    
+    return {"status": "ok", "message": "Message deleted successfully"}

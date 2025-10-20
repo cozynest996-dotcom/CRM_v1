@@ -811,6 +811,18 @@ class AIProcessor(NodeProcessor):
                 reply_prompt = self._generate_reply_style_prompt(node_data)
                 if reply_prompt:
                     system_prompt_parts.append(reply_prompt)
+                
+                # 🆕 添加分句回复支持
+                enable_split_reply = node_data.get("enable_split_reply", False)
+                if enable_split_reply:
+                    split_prompt = """
+分句回复模式：
+- 请将你的回复分成2-4个自然的短句
+- 每个句子应该完整且有意义
+- 在JSON的reply_text字段中，用 "||" 分隔每个句子
+- 例如："感谢您的咨询！||我们会尽快为您处理。||如有其他问题请随时联系我们。"
+"""
+                    system_prompt_parts.append(split_prompt)
             
             # 🆕 构建 JSON 输出格式要求
             json_schema = {
@@ -1056,8 +1068,35 @@ Remember: Return ONLY the JSON. No markdown, no explanations, just valid JSON.""
                     
                     should_handoff = enable_handoff and (ai_confidence <= handoff_threshold)
                     
+                    # 🆕 处理分句回复
+                    reply_data = llm_response.get("reply", {})
+                    reply_text = reply_data.get("reply_text", "")
+                    
+                    # 检查是否启用了分句回复并且回复中包含分隔符
+                    enable_split_reply = node_data.get("enable_split_reply", False)
+                    if enable_split_reply and "||" in reply_text:
+                        # 分割回复为多条消息
+                        split_messages = [msg.strip() for msg in reply_text.split("||") if msg.strip()]
+                        print(f"  🔀 分句回复：将回复分割为 {len(split_messages)} 条消息")
+                        
+                        # 创建消息模板数组
+                        message_templates = []
+                        for i, msg in enumerate(split_messages):
+                            message_templates.append({
+                                "id": i + 1,
+                                "content": msg
+                            })
+                        
+                        # 将分句消息添加到回复数据中
+                        reply_data["message_templates"] = message_templates
+                        reply_data["split_messages"] = split_messages
+                        
+                        # 同时设置到上下文中供后续节点使用
+                        self.context.variables["message_templates"] = message_templates
+                        print(f"  📝 分句消息: {[msg['content'] for msg in message_templates]}")
+                    
                     # 更新 context.ai 并返回分支
-                    self.context.ai['reply'] = llm_response.get("reply", {})
+                    self.context.ai['reply'] = reply_data
                     self.context.ai['analyze'] = llm_response.get("analyze", {})
                     self.context.ai['meta'] = llm_response.get("meta", {})
                     self.context.ai['prompt_used'] = {"system": system_prompt, "user": resolved_user_prompt}
@@ -3017,28 +3056,38 @@ class SendTelegramMessageProcessor(NodeProcessor):
             to = trigger_data.get("chat_id", trigger_data.get("phone", ""))
             print(f"  未知模式，默认使用触发器 (Chat ID/Phone): {to}")
 
-        # 解析消息内容
-        message_to_send = ""
+        # 解析消息内容 - 支持多条消息
+        messages_to_send = []
         
         # 优先使用节点配置中的模板
         if message_template:
-            message_to_send = self._resolve_variable_from_context(message_template)
-            print(f"  ✅ 使用节点模板消息: '{message_to_send}'")
+            resolved_message = self._resolve_variable_from_context(message_template)
+            messages_to_send.append(resolved_message)
+            print(f"  ✅ 使用节点模板消息: '{resolved_message}'")
         
         # 如果节点模板为空，尝试从上下文中获取消息内容（模板处理器或其他处理器的输出）
-        if not message_to_send:
+        if not messages_to_send:
             # 调试：打印完整的上下文信息
             print(f"  🔍 调试上下文信息:")
             print(f"    - 完整上下文键: {list(self.context.variables.keys())}")
             
-            # 1. 优先从模板处理器输出获取 (message_content)
-            template_message = self.context.variables.get("message_content")
-            if template_message:
-                message_to_send = template_message
-                print(f"  ✅ 使用模板处理器输出: '{message_to_send}'")
+            # 1. 优先从模板处理器输出获取多条消息 (message_templates)
+            template_messages = self.context.variables.get("message_templates", [])
+            if template_messages and isinstance(template_messages, list):
+                for msg_obj in template_messages:
+                    if isinstance(msg_obj, dict) and msg_obj.get("content"):
+                        messages_to_send.append(msg_obj["content"])
+                print(f"  ✅ 使用模板处理器多条消息输出: {len(messages_to_send)} 条消息")
             
-            # 2. 如果没有模板输出，尝试从 AI 回复中获取
-            if not message_to_send:
+            # 2. 如果没有多条消息，尝试单条消息 (message_content)
+            if not messages_to_send:
+                template_message = self.context.variables.get("message_content")
+                if template_message:
+                    messages_to_send.append(template_message)
+                    print(f"  ✅ 使用模板处理器单条消息输出: '{template_message}'")
+            
+            # 3. 如果没有模板输出，尝试从 AI 回复中获取
+            if not messages_to_send:
                 ai_data = self.context.variables.get("ai")
                 print(f"    - ai 对象: {ai_data}")
                 print(f"    - ai 对象类型: {type(ai_data)}")
@@ -3049,24 +3098,30 @@ class SendTelegramMessageProcessor(NodeProcessor):
                     print(f"    - ai.reply 类型: {type(reply_obj)}")
                     
                     if reply_obj and isinstance(reply_obj, dict):
-                        message_to_send = reply_obj.get("reply_text")
-                        print(f"  ✅ 使用 AI 回复: '{message_to_send}'")
+                        ai_message = reply_obj.get("reply_text")
+                        if ai_message:
+                            messages_to_send.append(ai_message)
+                            print(f"  ✅ 使用 AI 回复: '{ai_message}'")
                 
                 # 备用方法：尝试直接从 context.ai 获取（如果 variables 复制失败）
-                if not message_to_send and hasattr(self.context, 'ai'):
+                if not messages_to_send and hasattr(self.context, 'ai'):
                     reply_obj = self.context.ai.get("reply", {})
                     print(f"    - 备用：从 context.ai.reply 获取: {reply_obj}")
                     if reply_obj and isinstance(reply_obj, dict):
-                        message_to_send = reply_obj.get("reply_text")
-                        print(f"  ✅ 备用方式使用 AI 回复: '{message_to_send}'")
+                        ai_message = reply_obj.get("reply_text")
+                        if ai_message:
+                            messages_to_send.append(ai_message)
+                            print(f"  ✅ 备用方式使用 AI 回复: '{ai_message}'")
             
-            # 3. 最终fallback，使用默认消息
-            if not message_to_send:
-                message_to_send = self.context.get("chat.last_message", "Hi! We received your message.")
-                print(f"  ⚠️ 使用默认消息 (无其他消息源): '{message_to_send}'")
+            # 4. 最终fallback，使用默认消息
+            if not messages_to_send:
+                default_message = self.context.get("chat.last_message", "Hi! We received your message.")
+                messages_to_send.append(default_message)
+                print(f"  ⚠️ 使用默认消息 (无其他消息源): '{default_message}'")
 
         print(f"  最终接收方 (to): '{to}'")
-        print(f"  最终消息内容: '{message_to_send}'")
+        print(f"  最终消息数量: {len(messages_to_send)} 条")
+        print(f"  最终消息内容: {messages_to_send}")
 
         if not to:
             raise ValueError("Recipient (chat_id) for Telegram message is empty.")
@@ -3078,23 +3133,35 @@ class SendTelegramMessageProcessor(NodeProcessor):
             raise ValueError("Customer not found in context, cannot retrieve Telegram API credentials.")
         user_id = customer.user_id # 从客户中获取 user_id
 
-        # 处理媒体文件 - 从节点配置和 AI 回复中获取
+        # 处理媒体文件 - 从节点配置、模板处理器和 AI 回复中获取
         media_uuids = node_data.get("media_uuids", [])
         folder_names = node_data.get("folder_names", [])
         
+        # 从模板处理器获取媒体文件和设置
+        media_settings = {}
+        template_media_list = self.context.variables.get("media_list", [])
+        template_media_settings = self.context.variables.get("media_settings", {})
+        
+        if template_media_list:
+            # 从模板媒体列表中提取 UUID
+            template_media_uuids = [media.get("uuid") for media in template_media_list if media.get("uuid")]
+            media_uuids.extend(template_media_uuids)
+            media_settings.update(template_media_settings)
+            print(f"  📋 从模板处理器获取媒体 - 数量: {len(template_media_uuids)}")
+        
         # 从 AI 回复中获取媒体文件和媒体设置
         ai_data = self.context.variables.get("ai")
-        media_settings = {}
         if ai_data and isinstance(ai_data, dict):
             ai_reply = ai_data.get("reply", {})
             if ai_reply and isinstance(ai_reply, dict):
                 ai_media_uuids = ai_reply.get("media_uuids", [])
                 ai_folder_names = ai_reply.get("folder_names", [])
-                media_settings = ai_reply.get("media_settings", {})
+                ai_media_settings = ai_reply.get("media_settings", {})
                 
-                # 合并 AI 回复中的媒体文件
+                # 合并 AI 回复中的媒体文件和设置
                 media_uuids.extend(ai_media_uuids)
                 folder_names.extend(ai_folder_names)
+                media_settings.update(ai_media_settings)
                 
                 if ai_media_uuids or ai_folder_names:
                     print(f"  🤖 从 AI 回复获取媒体 - UUIDs: {len(ai_media_uuids)}, 文件夹: {len(ai_folder_names)}")
@@ -3108,7 +3175,7 @@ class SendTelegramMessageProcessor(NodeProcessor):
         print(f"  媒体文件数量: {len(media_urls)}")
         print(f"  媒体设置: {media_settings}")
 
-        if not message_to_send and not media_urls:
+        if not messages_to_send and not media_urls:
             raise ValueError("Message content and media files for Telegram message are both empty.")
         api_id = settings_service.get_setting_for_user('telegram_api_id', user_id)
         api_hash = settings_service.get_setting_for_user('telegram_api_hash', user_id)
@@ -3141,12 +3208,22 @@ class SendTelegramMessageProcessor(NodeProcessor):
                     
                     # 发送消息和媒体文件
                     if media_urls:
+                        # 获取媒体发送配置
                         send_separately = media_settings.get("send_media_separately", False)
                         send_with_caption = media_settings.get("send_with_caption", True)
                         delay_between_media = media_settings.get("delay_between_media", False)
                         delay_seconds = media_settings.get("delay_seconds", 2)
                         
-                        if send_separately:
+                        # 检查媒体发送模式
+                        media_send_mode = media_settings.get("media_send_mode", "together_with_caption")
+                        
+                        print(f"  📋 Telegram Bot 媒体发送配置:")
+                        print(f"    - 发送模式: {media_send_mode}")
+                        print(f"    - 分开发送: {send_separately}")
+                        print(f"    - 附带说明: {send_with_caption}")
+                        print(f"    - 延迟发送: {delay_between_media} ({delay_seconds}秒)")
+                        
+                        if media_send_mode == "separately" or send_separately:
                             # 分开发送：先发送媒体，再发送文本
                             print(f"  🖼️ Telegram Bot 分开发送模式：先发送所有媒体文件")
                             
@@ -3160,31 +3237,78 @@ class SendTelegramMessageProcessor(NodeProcessor):
                                 await bot_client.send_message(entity=entity, message="", file=media_url)
                             
                             # 所有媒体发送完成后，再发送文本消息
-                            if message_to_send:
-                                print(f"  📝 媒体发送完成，现在发送文本消息")
-                                await bot_client.send_message(entity=entity, message=message_to_send)
-                        else:
-                            # 一起发送模式
-                            if len(media_urls) == 1 and message_to_send and send_with_caption:
-                                # 单个媒体文件，带文本
-                                print(f"  📤 发送带文本的单个媒体文件")
-                                await bot_client.send_message(entity=entity, message=message_to_send, file=media_urls[0])
-                            else:
-                                # 多个媒体文件或只有媒体文件
-                                if message_to_send:
-                                    print(f"  📝 先发送文本消息")
-                                    await bot_client.send_message(entity=entity, message=message_to_send)
+                            if messages_to_send:
+                                print(f"  📝 媒体发送完成，现在发送 {len(messages_to_send)} 条文本消息")
+                                for i, message in enumerate(messages_to_send):
+                                    if i > 0:
+                                        await asyncio.sleep(1)  # 消息间延迟1秒
+                                    print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                    await bot_client.send_message(entity=entity, message=message)
                                 
+                        elif media_send_mode == "together_with_caption":
+                            # 一起发送模式：媒体附带文本说明
+                            if len(media_urls) == 1 and messages_to_send and send_with_caption:
+                                # 单个媒体文件，带第一条文本
+                                first_message = messages_to_send[0]
+                                print(f"  📤 发送带文本的单个媒体文件: '{first_message}'")
+                                await bot_client.send_message(entity=entity, message=first_message, file=media_urls[0])
+                                
+                                # 发送剩余的文本消息
+                                for i, message in enumerate(messages_to_send[1:], 1):
+                                    await asyncio.sleep(1)  # 消息间延迟1秒
+                                    print(f"  📝 发送剩余文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                    await bot_client.send_message(entity=entity, message=message)
+                            else:
+                                # 多个媒体文件：第一个带文本，其余单独发送
                                 for i, media_url in enumerate(media_urls):
                                     if delay_between_media and i > 0:
                                         print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
                                         await asyncio.sleep(delay_seconds)
                                     
-                                    print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
-                                    await bot_client.send_message(entity=entity, message="", file=media_url)
+                                    if i == 0 and messages_to_send and send_with_caption:
+                                        # 第一个媒体文件带第一条文本
+                                        first_message = messages_to_send[0]
+                                        print(f"  🖼️📝 发送带文本的媒体文件 {i+1}/{len(media_urls)}: '{first_message}'")
+                                        await bot_client.send_message(entity=entity, message=first_message, file=media_url)
+                                    else:
+                                        # 其余媒体文件单独发送
+                                        print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                                        await bot_client.send_message(entity=entity, message="", file=media_url)
+                                
+                                # 发送剩余的文本消息（如果有多条消息）
+                                if len(messages_to_send) > 1:
+                                    print(f"  📝 发送剩余的 {len(messages_to_send)-1} 条文本消息")
+                                    for i, message in enumerate(messages_to_send[1:], 1):
+                                        await asyncio.sleep(1)  # 消息间延迟1秒
+                                        print(f"  📝 发送剩余文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                        await bot_client.send_message(entity=entity, message=message)
+                        else:  # media_only 或其他模式
+                            # 只发送媒体文件
+                            print(f"  🖼️ 只发送媒体文件模式")
+                            for i, media_url in enumerate(media_urls):
+                                if delay_between_media and i > 0:
+                                    print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                    await asyncio.sleep(delay_seconds)
+                                
+                                print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                                await bot_client.send_message(entity=entity, message="", file=media_url)
+                            
+                            # 如果是 media_only 模式但仍有文本，单独发送文本
+                            if messages_to_send and media_send_mode != "media_only":
+                                print(f"  📝 发送 {len(messages_to_send)} 条文本消息")
+                                for i, message in enumerate(messages_to_send):
+                                    if i > 0:
+                                        await asyncio.sleep(1)  # 消息间延迟1秒
+                                    print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                    await bot_client.send_message(entity=entity, message=message)
                     else:
                         # 只发送文本消息
-                        await bot_client.send_message(entity=entity, message=message_to_send)
+                        print(f"  📝 只发送 {len(messages_to_send)} 条文本消息")
+                        for i, message in enumerate(messages_to_send):
+                            if i > 0:
+                                await asyncio.sleep(1)  # 消息间延迟1秒
+                            print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                            await bot_client.send_message(entity=entity, message=message)
                     
                     print(f"✅ Telegram Bot 消息发送成功到 {to}")
             except Exception as e:
@@ -3244,12 +3368,22 @@ class SendTelegramMessageProcessor(NodeProcessor):
 
                 # 发送消息和媒体文件
                 if media_urls:
+                    # 获取媒体发送配置
                     send_separately = media_settings.get("send_media_separately", False)
                     send_with_caption = media_settings.get("send_with_caption", True)
                     delay_between_media = media_settings.get("delay_between_media", False)
                     delay_seconds = media_settings.get("delay_seconds", 2)
                     
-                    if send_separately:
+                    # 检查媒体发送模式
+                    media_send_mode = media_settings.get("media_send_mode", "together_with_caption")
+                    
+                    print(f"  📋 Telegram 用户会话媒体发送配置:")
+                    print(f"    - 发送模式: {media_send_mode}")
+                    print(f"    - 分开发送: {send_separately}")
+                    print(f"    - 附带说明: {send_with_caption}")
+                    print(f"    - 延迟发送: {delay_between_media} ({delay_seconds}秒)")
+                    
+                    if media_send_mode == "separately" or send_separately:
                         # 分开发送：先发送媒体，再发送文本
                         print(f"  🖼️ Telegram 用户会话分开发送模式：先发送所有媒体文件")
                         
@@ -3263,31 +3397,79 @@ class SendTelegramMessageProcessor(NodeProcessor):
                             await client.send_message(entity=entity, message="", file=media_url)
                         
                         # 所有媒体发送完成后，再发送文本消息
-                        if message_to_send:
-                            print(f"  📝 媒体发送完成，现在发送文本消息")
-                            await client.send_message(entity=entity, message=message_to_send)
-                    else:
-                        # 一起发送模式
-                        if len(media_urls) == 1 and message_to_send and send_with_caption:
-                            # 单个媒体文件，带文本
-                            print(f"  📤 发送带文本的单个媒体文件")
-                            await client.send_message(entity=entity, message=message_to_send, file=media_urls[0])
-                        else:
-                            # 多个媒体文件或只有媒体文件
-                            if message_to_send:
-                                print(f"  📝 先发送文本消息")
-                                await client.send_message(entity=entity, message=message_to_send)
+                        if messages_to_send:
+                            print(f"  📝 媒体发送完成，现在发送 {len(messages_to_send)} 条文本消息")
+                            for i, message in enumerate(messages_to_send):
+                                if i > 0:
+                                    await asyncio.sleep(1)  # 消息间延迟1秒
+                                print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                await client.send_message(entity=entity, message=message)
                             
+                    elif media_send_mode == "together_with_caption":
+                        # 一起发送模式：媒体附带文本说明
+                        if len(media_urls) == 1 and messages_to_send and send_with_caption:
+                            # 单个媒体文件，带第一条文本
+                            first_message = messages_to_send[0]
+                            print(f"  📤 发送带文本的单个媒体文件: '{first_message}'")
+                            await client.send_message(entity=entity, message=first_message, file=media_urls[0])
+                            
+                            # 发送剩余的文本消息
+                            for i, message in enumerate(messages_to_send[1:], 1):
+                                await asyncio.sleep(1)  # 消息间延迟1秒
+                                print(f"  📝 发送剩余文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                await client.send_message(entity=entity, message=message)
+                        else:
+                            # 多个媒体文件：第一个带文本，其余单独发送
                             for i, media_url in enumerate(media_urls):
                                 if delay_between_media and i > 0:
                                     print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
                                     await asyncio.sleep(delay_seconds)
                                 
-                                print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
-                                await client.send_message(entity=entity, message="", file=media_url)
+                                if i == 0 and messages_to_send and send_with_caption:
+                                    # 第一个媒体文件带第一条文本
+                                    first_message = messages_to_send[0]
+                                    print(f"  🖼️📝 发送带文本的媒体文件 {i+1}/{len(media_urls)}: '{first_message}'")
+                                    await client.send_message(entity=entity, message=first_message, file=media_url)
+                                else:
+                                    # 其余媒体文件单独发送
+                                    print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                                    await client.send_message(entity=entity, message="", file=media_url)
+                            
+                            # 发送剩余的文本消息（如果有多条消息）
+                            if len(messages_to_send) > 1:
+                                print(f"  📝 发送剩余的 {len(messages_to_send)-1} 条文本消息")
+                                for i, message in enumerate(messages_to_send[1:], 1):
+                                    await asyncio.sleep(1)  # 消息间延迟1秒
+                                    print(f"  📝 发送剩余文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                    await client.send_message(entity=entity, message=message)
+                                    
+                    else:  # media_only 或其他模式
+                        # 只发送媒体文件
+                        print(f"  🖼️ 只发送媒体文件模式")
+                        for i, media_url in enumerate(media_urls):
+                            if delay_between_media and i > 0:
+                                print(f"  ⏱️ 延迟 {delay_seconds} 秒...")
+                                await asyncio.sleep(delay_seconds)
+                            
+                            print(f"  🖼️ 发送媒体文件 {i+1}/{len(media_urls)}: {media_url}")
+                            await client.send_message(entity=entity, message="", file=media_url)
+                        
+                        # 如果是 media_only 模式但仍有文本，单独发送文本
+                        if messages_to_send and media_send_mode != "media_only":
+                            print(f"  📝 发送 {len(messages_to_send)} 条文本消息")
+                            for i, message in enumerate(messages_to_send):
+                                if i > 0:
+                                    await asyncio.sleep(1)  # 消息间延迟1秒
+                                print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                                await client.send_message(entity=entity, message=message)
                 else:
                     # 只发送文本消息
-                    await client.send_message(entity=entity, message=message_to_send)
+                    print(f"  📝 只发送 {len(messages_to_send)} 条文本消息")
+                    for i, message in enumerate(messages_to_send):
+                        if i > 0:
+                            await asyncio.sleep(1)  # 消息间延迟1秒
+                        print(f"  📝 发送文本消息 {i+1}/{len(messages_to_send)}: '{message}'")
+                        await client.send_message(entity=entity, message=message)
                 
                 print(f"✅ Telegram 用户会话消息发送成功到 {to}")
             except Exception as e:
@@ -3304,7 +3486,8 @@ class SendTelegramMessageProcessor(NodeProcessor):
             "status": "success",
             "message": "Telegram message sent successfully",
             "to": to,
-            "content": message_to_send
+            "content": messages_to_send,
+            "message_count": len(messages_to_send)
         }
 
     def _resolve_variable_from_context(self, text: str) -> str:

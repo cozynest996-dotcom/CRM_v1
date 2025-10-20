@@ -68,6 +68,9 @@ class TelegramListenerManager:
 
     async def _monitor_connection_health(self, user_id: int):
         """监控用户连接健康状态并在需要时重连"""
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+        
         while user_id in self._clients:
             try:
                 await asyncio.sleep(self.health_check_interval)
@@ -80,8 +83,19 @@ class TelegramListenerManager:
                 # 检查连接状态
                 if not client.is_connected():
                     logger.warning(f"User {user_id} client is disconnected, attempting reconnection")
-                    await self._attempt_reconnection(user_id)
+                    success = await self._attempt_reconnection(user_id)
+                    if not success:
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.error(f"User {user_id} has {consecutive_failures} consecutive failures, will retry in 5 minutes")
+                            await asyncio.sleep(300)  # 等待5分钟
+                            consecutive_failures = 0  # 重置计数器
+                    else:
+                        consecutive_failures = 0  # 重置计数器
                     continue
+                
+                # 连接正常，重置失败计数器
+                consecutive_failures = 0
                 
                 # 检查最后活动时间
                 last_activity = self._last_activity.get(user_id)
@@ -97,13 +111,22 @@ class TelegramListenerManager:
                         except Exception as e:
                             logger.warning(f"Ping test failed for user {user_id}: {e}")
                             await self._attempt_reconnection(user_id)
+                else:
+                    # 如果没有活动记录，设置当前时间
+                    self._last_activity[user_id] = datetime.now()
                 
             except asyncio.CancelledError:
                 logger.info(f"Health monitor for user {user_id} was cancelled")
                 break
             except Exception as e:
                 logger.error(f"Error in health monitor for user {user_id}: {e}")
-                await asyncio.sleep(60)  # 等待1分钟后继续监控
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.error(f"Health monitor for user {user_id} has {consecutive_failures} consecutive errors, sleeping for 5 minutes")
+                    await asyncio.sleep(300)  # 等待5分钟
+                    consecutive_failures = 0
+                else:
+                    await asyncio.sleep(60)  # 等待1分钟后继续监控
 
     async def _attempt_reconnection(self, user_id: int):
         """尝试重新连接用户的 Telegram 客户端"""
@@ -343,12 +366,43 @@ class TelegramListenerManager:
                 "chat_history": chat_history # 包含从 Telethon 客户端获取的历史消息
             }
             
-            # 调用 /api/messages/inbox 端点
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.post(self.webhook_url, json=inbox_payload, timeout=30)
-                response.raise_for_status() # 如果请求失败，抛出异常
-                logger.info(f"✅ Successfully forwarded Telegram message to /messages/inbox for user {user_id}.")
+            # 🔧 修复：直接调用内部函数而不是HTTP请求，避免超时问题
+            try:
+                from app.routers.messages import receive_message
+                from app.db.database import SessionLocal
+                
+                # 创建数据库会话
+                db = SessionLocal()
+                try:
+                    # 直接调用消息处理函数
+                    result = await receive_message(inbox_payload, db)
+                    logger.info(f"✅ Successfully processed Telegram message for user {user_id} via direct call.")
+                finally:
+                    db.close()
+            except Exception as direct_call_error:
+                logger.warning(f"Direct call failed for user {user_id}: {direct_call_error}, falling back to HTTP")
+                
+                # Fallback: 使用HTTP调用，但增加重试和更好的错误处理
+                import httpx
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+                            response = await client.post(self.webhook_url, json=inbox_payload)
+                            response.raise_for_status()
+                            logger.info(f"✅ Successfully forwarded Telegram message to /messages/inbox for user {user_id} (attempt {attempt + 1}).")
+                            break
+                    except (httpx.ReadTimeout, httpx.ConnectTimeout) as timeout_error:
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # 指数退避
+                            logger.warning(f"Timeout on attempt {attempt + 1} for user {user_id}, retrying in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logger.error(f"All HTTP attempts failed for user {user_id}: {timeout_error}")
+                            raise
+                    except Exception as http_error:
+                        logger.error(f"HTTP request failed for user {user_id}: {http_error}")
+                        raise
 
         except Exception as e:
             logger.error(f"Error handling new Telegram message for user {user_id}: {e}", exc_info=True)

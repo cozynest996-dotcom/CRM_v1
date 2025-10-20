@@ -57,16 +57,50 @@ async def ensure_telegram_listener():
     except Exception as e:
         logger.error(f"❌ Failed to ensure Telegram listener: {e}")
 
+# 🔧 新增：后台任务定期检查监听器状态
+async def periodic_telegram_health_check():
+    """定期检查 Telegram 监听器健康状态"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # 每5分钟检查一次
+            logger.info("🔍 Performing periodic Telegram listener health check...")
+            await ensure_telegram_listener()
+        except asyncio.CancelledError:
+            logger.info("Periodic health check task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in periodic health check: {e}")
+            await asyncio.sleep(60)  # 出错时等待1分钟再继续
+
+# 全局任务引用
+health_check_task = None
+
 # ✅ 启动时创建表和启动 Telegram 监听器
 @app.on_event("startup")
 async def on_startup(): # Make it async
+    global health_check_task
     init_db()
     create_default_subscription_plans()
     await ensure_telegram_listener()
+    
+    # 启动定期健康检查任务
+    health_check_task = asyncio.create_task(periodic_telegram_health_check())
+    logger.info("✅ Periodic Telegram health check task started")
 
 @app.on_event("shutdown")
 async def on_shutdown(): # Add shutdown event
-    global telegram_listener_instance
+    global telegram_listener_instance, health_check_task
+    
+    # 停止健康检查任务
+    if health_check_task:
+        health_check_task.cancel()
+        try:
+            await health_check_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("✅ Periodic health check task stopped")
+    
+    # 停止Telegram监听器
     if telegram_listener_instance:
         await telegram_listener_instance.stop_listening_all_users()
         logger.info("✅ Telegram listener stopped successfully")

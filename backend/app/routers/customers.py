@@ -168,7 +168,10 @@ def list_customers(
         # 获取 last_message 简要（若需要）
         last = (
             db.query(models.Message)
-            .filter(models.Message.customer_id == c.id)
+            .filter(
+                models.Message.customer_id == c.id,
+                models.Message.user_id == current_user.id  # 🔒 确保消息也属于当前用户
+            )
             .order_by(models.Message.timestamp.desc())
             .first()
         )
@@ -408,7 +411,10 @@ def list_customer_summaries(
     for c in customers:
         last = (
             db.query(models.Message)
-            .filter(models.Message.customer_id == c.id)
+            .filter(
+                models.Message.customer_id == c.id,
+                models.Message.user_id == current_user.id  # 🔒 确保消息也属于当前用户
+            )
             .order_by(models.Message.timestamp.desc())
             .first()
         )
@@ -459,7 +465,10 @@ def get_customer(customer_id: uuid.UUID, db: Session = Depends(get_db), current_
 
     last = (
         db.query(models.Message)
-        .filter(models.Message.customer_id == customer.id)
+        .filter(
+            models.Message.customer_id == customer.id,
+            models.Message.user_id == current_user.id  # 🔒 确保消息也属于当前用户
+        )
         .order_by(models.Message.timestamp.desc())
         .first()
     )

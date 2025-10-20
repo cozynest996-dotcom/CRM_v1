@@ -13,15 +13,20 @@ class TelegramService:
     def __init__(self):
         self.gateway_url = settings.TELEGRAM_GATEWAY_URL
     
-    async def send_message(self, chat_id: Union[int, str], message: str, user_id: int = None, bot_token: str = None) -> Dict[str, Any]:
-        """发送消息（异步版本，用于工作流引擎）"""
+    async def send_message(self, chat_id: Union[int, str], message: str, user_id: int = None, bot_token: str = None, media_url: str = None, media_type: str = None) -> Dict[str, Any]:
+        """发送消息（异步版本，用于工作流引擎）
+        
+        Args:
+            chat_id: Telegram聊天ID
+            message: 消息文本内容
+            user_id: 用户ID
+            bot_token: Bot Token (可选，如果不提供则使用用户会话)
+            media_url: 媒体文件URL (可选)
+            media_type: 媒体类型 (image, video, document等)
+        """
         if not user_id:
             logger.error("Cannot send Telegram message: user_id is required")
             raise ValueError("user_id is required for sending Telegram messages")
-
-        if not bot_token:
-            logger.error("Cannot send Telegram message: bot_token is required")
-            raise ValueError("bot_token is required for sending Telegram messages")
 
         # 為工作流生成 JWT token
         from app.services.auth import AuthService
@@ -48,6 +53,12 @@ class TelegramService:
         # 如果提供了 bot_token，添加到 payload 中
         if bot_token:
             payload["bot_token"] = bot_token
+            
+        # 如果提供了媒体，添加到 payload 中
+        if media_url:
+            payload["media_url"] = media_url
+            if media_type:
+                payload["media_type"] = media_type
         
         headers = {
             "Content-Type": "application/json",
@@ -56,7 +67,8 @@ class TelegramService:
         }
         
         url = f"{self.gateway_url}/send"
-        logger.info(f"Sending Telegram message to {chat_id} for user {user_id}")
+        media_info = f" with media: {media_url} ({media_type})" if media_url else ""
+        logger.info(f"Sending Telegram message to {chat_id} for user {user_id}{media_info}")
         
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=settings.GATEWAY_TIMEOUT)

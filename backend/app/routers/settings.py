@@ -416,10 +416,13 @@ async def verify_telegram_code(data: Dict = Body(...), db: Session = Depends(get
             # We can try to get it now if the client is still connected and authorized.
             if client.is_connected() and await client.is_user_authorized():
                 string_sess = client.session.save() # Get string session if available
+                logger.info(f"Successfully extracted string session for user {current_user.id} (length: {len(string_sess) if string_sess else 0})")
             
             if string_sess:
                 settings_service.save_setting_for_user('telegram_string_session', string_sess, current_user.id)
-                logger.info(f"Saved telegram_string_session for user {current_user.id}")
+                logger.info(f"✅ Saved telegram_string_session for user {current_user.id}")
+            else:
+                logger.warning(f"⚠️ No string session available for user {current_user.id} - client connected: {client.is_connected()}, authorized: {await client.is_user_authorized() if client.is_connected() else False}")
         except Exception as e:
             logger.error(f"Failed to get or save telegram_string_session for user {current_user.id}: {e}", exc_info=True)
 
@@ -447,6 +450,85 @@ async def verify_telegram_code(data: Dict = Body(...), db: Session = Depends(get
             settings_service.save_setting_for_user('telegram_phone', telegram_phone, current_user.id)
             logger.info(f"Saved telegram_phone {telegram_phone} for user {current_user.id}")
 
+        # 🔧 启动新的监听器来监听该用户的消息
+        try:
+            from app.services.telegram_listener import TelegramListenerManager
+            listener_manager = TelegramListenerManager()
+            
+            # 检查是否已经有监听器在运行
+            if current_user.id not in listener_manager._clients:
+                logger.info(f"Starting Telegram listener for newly connected user {current_user.id}")
+                
+                # 获取用户的API凭据
+                api_id_str = settings_service.get_setting_for_user('telegram_api_id', current_user.id)
+                api_hash = settings_service.get_setting_for_user('telegram_api_hash', current_user.id)
+                
+                if api_id_str and api_hash:
+                    try:
+                        api_id = int(api_id_str)
+                        
+                        # 尝试使用字符串会话启动监听器，如果没有则使用session文件
+                        string_session = settings_service.get_setting_for_user('telegram_string_session', current_user.id)
+                        session_file_b64 = settings_service.get_setting_for_user('telegram_session_file', current_user.id)
+                        
+                        session_param = None
+                        if string_session:
+                            from telethon.sessions import StringSession
+                            session_param = StringSession(string_session)
+                            logger.info(f"Using StringSession for user {current_user.id}")
+                        elif session_file_b64:
+                            # 使用session文件作为fallback
+                            try:
+                                import base64
+                                import tempfile
+                                import uuid
+                                import os
+                                
+                                # 解码session文件
+                                s = session_file_b64.strip().replace('\n','').replace('\r','').replace(' ','')
+                                pad = len(s) % 4
+                                if pad != 0:
+                                    s += '=' * (4 - pad)
+                                data = base64.b64decode(s)
+                                
+                                # 创建临时文件
+                                temp_filename = f"tg_session_{current_user.id}_{uuid.uuid4().hex}.session"
+                                temp_session_file_path = os.path.join(tempfile.gettempdir(), temp_filename)
+                                with open(temp_session_file_path, 'wb') as fh:
+                                    fh.write(data)
+                                
+                                session_param = temp_session_file_path
+                                logger.info(f"Using session file for user {current_user.id}: {temp_session_file_path}")
+                            except Exception as e:
+                                logger.error(f"Failed to decode session file for user {current_user.id}: {e}")
+                        
+                        if session_param:
+                            # 创建监听任务
+                            import asyncio
+                            task = asyncio.create_task(
+                                listener_manager._start_listening_for_user(
+                                    current_user.id, 
+                                    session_param, 
+                                    api_id, 
+                                    api_hash,
+                                    temp_session_file_path if isinstance(session_param, str) else None
+                                )
+                            )
+                            listener_manager._tasks[current_user.id] = task
+                            logger.info(f"✅ Started Telegram listener for user {current_user.id}")
+                        else:
+                            logger.warning(f"No valid session (string or file) found for user {current_user.id}, cannot start listener")
+                    except ValueError as e:
+                        logger.error(f"Invalid API ID for user {current_user.id}: {api_id_str}")
+                else:
+                    logger.warning(f"Missing API credentials for user {current_user.id}, cannot start listener")
+            else:
+                logger.info(f"Telegram listener already running for user {current_user.id}")
+                
+        except Exception as e:
+            logger.error(f"Failed to start Telegram listener for user {current_user.id}: {e}")
+            # 不要因为监听器启动失败而阻止验证成功
+
         return { 'status': 'connected' }
     except HTTPException:
         raise
@@ -460,17 +542,66 @@ async def logout_telegram_session(data: Dict = Body(...), db: Session = Depends(
     """Logout and remove saved telegram session for current user.
     Body: {} (no body required)"""
     try:
+        logger.info(f"Starting Telegram logout for user {current_user.id}")
+        
+        # 🔧 首先停止监听器中的客户端连接
+        try:
+            from app.services.telegram_listener import TelegramListenerManager
+            listener_manager = TelegramListenerManager()
+            
+            # 检查并停止该用户的监听器
+            if current_user.id in listener_manager._clients:
+                client = listener_manager._clients[current_user.id]
+                if client and client.is_connected():
+                    await client.disconnect()
+                    logger.info(f"Disconnected Telegram client for user {current_user.id}")
+                
+                # 清理监听器中的用户数据
+                if current_user.id in listener_manager._clients:
+                    del listener_manager._clients[current_user.id]
+                if current_user.id in listener_manager._tasks:
+                    task = listener_manager._tasks[current_user.id]
+                    if not task.done():
+                        task.cancel()
+                    del listener_manager._tasks[current_user.id]
+                if current_user.id in listener_manager._health_monitors:
+                    monitor = listener_manager._health_monitors[current_user.id]
+                    if not monitor.done():
+                        monitor.cancel()
+                    del listener_manager._health_monitors[current_user.id]
+                if current_user.id in listener_manager._connection_attempts:
+                    del listener_manager._connection_attempts[current_user.id]
+                if current_user.id in listener_manager._last_activity:
+                    del listener_manager._last_activity[current_user.id]
+                
+                logger.info(f"Cleaned up listener data for user {current_user.id}")
+        except Exception as e:
+            logger.warning(f"Error stopping listener for user {current_user.id}: {e}")
+        
         # remove stored string session setting
         settings_service = SettingsService(db)
         try:
             settings_service.delete_setting_for_user('telegram_string_session', current_user.id)
-        except Exception:
-            pass
+            logger.info(f"Deleted telegram_string_session for user {current_user.id}")
+        except Exception as e:
+            logger.warning(f"Error deleting telegram_string_session for user {current_user.id}: {e}")
+        
         # also remove stored session file backup if present
         try:
             settings_service.delete_setting_for_user('telegram_session_file', current_user.id)
-        except Exception:
-            pass
+            logger.info(f"Deleted telegram_session_file for user {current_user.id}")
+        except Exception as e:
+            logger.warning(f"Error deleting telegram_session_file for user {current_user.id}: {e}")
+
+        # 🔧 清理其他相关的 Telegram 设置
+        try:
+            settings_service.delete_setting_for_user('telegram_api_id', current_user.id)
+            settings_service.delete_setting_for_user('telegram_api_hash', current_user.id)
+            settings_service.delete_setting_for_user('telegram_user_id', current_user.id)
+            settings_service.delete_setting_for_user('telegram_phone', current_user.id)
+            logger.info(f"Deleted additional Telegram settings for user {current_user.id}")
+        except Exception as e:
+            logger.warning(f"Error deleting additional Telegram settings for user {current_user.id}: {e}")
 
         # mark TelegramSession disconnected if exists (guarded)
         try:
@@ -479,10 +610,12 @@ async def logout_telegram_session(data: Dict = Body(...), db: Session = Depends(
                 sess.connected = False
                 db.add(sess)
                 db.commit()
+                logger.info(f"Marked TelegramSession as disconnected for user {current_user.id}")
         except Exception as e:
             # Log and continue - do not fail logout when DB/table missing or other DB errors
             logger.warning(f"Could not update TelegramSession for user {current_user.id}: {e}")
 
+        logger.info(f"Telegram logout completed for user {current_user.id}")
         return { 'status': 'ok' }
     except Exception as e:
         logger.error(f"Failed to logout telegram session: {e}")

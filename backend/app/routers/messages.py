@@ -39,13 +39,65 @@ def get_db():
 async def receive_message(data: dict, db: Session = Depends(get_db)):
     print(f"⏱️ {datetime.now()} - 收到消息推送: {data}")
     
+    # 🔧 新增：消息去重检查，防止历史消息重复触发工作流
+    channel = data.get("channel", "whatsapp")
+    chat_id = data.get("chat_id")
+    from_id = data.get("from_id")
+    timestamp_str = data.get("timestamp")
+    
+    # 如果是Telegram消息且有时间戳，检查是否为历史消息
+    if channel == "telegram" and timestamp_str and chat_id and from_id:
+        try:
+            # 解析消息时间戳
+            from datetime import timezone
+            import dateutil.parser
+            message_time = dateutil.parser.parse(timestamp_str)
+            
+            # 如果消息没有时区信息，假设为UTC
+            if message_time.tzinfo is None:
+                message_time = message_time.replace(tzinfo=timezone.utc)
+            
+            # 计算消息年龄（秒）
+            now = datetime.now(timezone.utc)
+            message_age_seconds = (now - message_time).total_seconds()
+            
+            # 如果消息超过5分钟，认为是历史消息，跳过工作流触发
+            if message_age_seconds > 300:  # 5分钟 = 300秒
+                print(f"⚠️ 跳过历史消息 (年龄: {message_age_seconds:.0f}秒): {data.get('content', '')[:50]}...")
+                
+                # 仍然保存消息到数据库，但标记为历史消息
+                data["is_historical"] = True
+                data["skip_workflow"] = True
+            else:
+                print(f"✅ 处理新消息 (年龄: {message_age_seconds:.0f}秒): {data.get('content', '')[:50]}...")
+                data["is_historical"] = False
+                data["skip_workflow"] = False
+                
+        except Exception as e:
+            print(f"⚠️ 无法解析消息时间戳 {timestamp_str}: {e}，按新消息处理")
+            data["is_historical"] = False
+            data["skip_workflow"] = False
+    else:
+        # 非Telegram消息或没有时间戳信息，按新消息处理
+        data["is_historical"] = False
+        data["skip_workflow"] = False
+    
     # 验证必要字段 - 对于语音消息，content 可能为空但有 media 数据
     content = data.get("content")
     media_base64 = data.get("media_base64")
     media_type = data.get("media_type")
     
+    # 🔧 修复：允许空内容的消息（例如系统消息、媒体消息等）
+    # 只要有基本的消息标识信息就允许处理
     if not content and not (media_base64 and media_type):
-        raise HTTPException(status_code=400, detail="Missing message content or media data")
+        # 如果既没有内容也没有媒体，但有其他标识信息（如phone、chat_id），则使用占位符
+        phone = data.get("phone")
+        chat_id = data.get("chat_id")
+        if phone or chat_id:
+            content = "[空消息]"  # 使用占位符内容
+            print(f"⚠️ 收到空内容消息，使用占位符: phone={phone}, chat_id={chat_id}")
+        else:
+            raise HTTPException(status_code=400, detail="Missing message content, media data, and contact information")
         
     # 获取消息来源渠道，默认为 whatsapp
     channel = data.get("channel", "whatsapp")
@@ -60,12 +112,12 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
     # 🔒 首先確定用戶ID
     owner_user_id = data.get("user_id")
     if owner_user_id is None:
-        # Fallback to admin user (mingkun1999@gmail.com) if user_id is not provided
-        admin_emails = settings.admin_emails.split(",")
-        admin_user = db.query(models.User).filter(
-            models.User.email.in_(admin_emails)
-        ).first()
-        owner_user_id = admin_user.id if admin_user else 1
+        # 🚨 严格要求 user_id，不允许 fallback 到 admin 用户
+        # 这确保了数据隔离，防止消息被错误分配给其他用户
+        raise HTTPException(
+            status_code=400, 
+            detail="Missing user_id in message data - cannot determine message owner"
+        )
     
     # 🔒 获取活动的工作流（僅限當前用戶的工作流）
     workflows = db.query(models.Workflow).filter(
@@ -109,6 +161,12 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
             ).first()
             if customer:
                 print(f"✅ 通过 phone ({phone}) 找到客户: {customer.name}")
+                # 🔧 修复：如果是 Telegram 消息且客户没有 telegram_chat_id，则更新它
+                if channel == "telegram" and chat_id and not customer.telegram_chat_id:
+                    customer.telegram_chat_id = str(chat_id)
+                    db.add(customer)
+                    db.commit()
+                    print(f"✅ 更新客户的 Telegram Chat ID: {chat_id}")
         
         if not customer:
             # 🔒 创建新客户，使用已確定的 user_id
@@ -238,6 +296,7 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
         # 检查是否是新客户的第一条消息
         is_first_message = not db.query(models.Message).filter(
             models.Message.customer_id == customer.id,
+            models.Message.user_id == owner_user_id,  # 🔒 确保消息也属于当前用户
             models.Message.id != db_msg.id
         ).first()
 
@@ -276,14 +335,19 @@ async def receive_message(data: dict, db: Session = Depends(get_db)):
         publish_event(event_data)
         print(f"📢 {datetime.now()} - 消息SSE事件已发送")
 
-        # 对每条消息都触发工作流
-        for workflow in workflows:
-            try:
-                print(f"🔄 {datetime.now()} - 触发工作流 {workflow.id}")
-                await workflow_engine.execute_workflow(workflow.id, trigger_data)
-            except Exception as e:
-                print(f"❌ {datetime.now()} - 工作流 {workflow.id} 执行失败: {str(e)}")
-                # 不要中断消息处理，继续执行其他工作流
+        # 🔧 新增：检查是否应该跳过工作流触发（历史消息）
+        skip_workflow = data.get("skip_workflow", False)
+        if skip_workflow:
+            print(f"⚠️ {datetime.now()} - 跳过历史消息的工作流触发")
+        else:
+            # 对每条消息都触发工作流
+            for workflow in workflows:
+                try:
+                    print(f"🔄 {datetime.now()} - 触发工作流 {workflow.id}")
+                    await workflow_engine.execute_workflow(workflow.id, trigger_data)
+                except Exception as e:
+                    print(f"❌ {datetime.now()} - 工作流 {workflow.id} 执行失败: {str(e)}")
+                    # 不要中断消息处理，继续执行其他工作流
 
         # 总是返回消息对象
         return MessageOut(
@@ -339,7 +403,47 @@ def send_message(
     elif msg.channel == "telegram":
         if not customer.telegram_chat_id:
             raise HTTPException(status_code=400, detail="Customer does not have a Telegram chat ID")
-        send_telegram_message(db_msg, customer.telegram_chat_id)
+        
+        # 🔧 修复：使用监听器管理器直接发送消息
+        try:
+            from app.main import telegram_listener_instance
+            import asyncio
+            
+            if not telegram_listener_instance:
+                raise HTTPException(status_code=500, detail="Telegram listener not available")
+            
+            # 检查用户是否有活跃的Telegram客户端
+            client = telegram_listener_instance._clients.get(current_user.id)
+            if not client or not client.is_connected():
+                raise HTTPException(status_code=400, detail="User Telegram session not active. Please login to Telegram first.")
+            
+            # 创建异步任务发送消息
+            async def send_telegram_via_listener():
+                try:
+                    # 直接使用客户端发送消息
+                    await client.send_message(entity=int(customer.telegram_chat_id), message=msg.content)
+                    print(f"✅ Telegram消息通过监听器发送成功到: {customer.telegram_chat_id}")
+                    return {"status": "sent"}
+                except Exception as e:
+                    print(f"❌ 监听器发送Telegram消息失败: {e}")
+                    raise e
+            
+            # 在新的事件循环中运行异步任务
+            try:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, send_telegram_via_listener())
+                    result = future.result(timeout=30)  # 30秒超时
+                    print(f"✅ Telegram发送结果: {result}")
+            except Exception as e:
+                print(f"❌ 异步发送Telegram消息失败: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to send Telegram message: {str(e)}")
+                
+        except HTTPException:
+            raise  # 重新抛出HTTP异常
+        except Exception as e:
+            print(f"❌ Telegram发送服务初始化失败: {e}")
+            raise HTTPException(status_code=500, detail=f"Telegram service error: {str(e)}")
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported channel: {msg.channel}")
 

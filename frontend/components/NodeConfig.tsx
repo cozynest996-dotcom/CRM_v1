@@ -1470,6 +1470,21 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
 
               {localData.enable_auto_reply && (
                 <>
+                  <div className="config-field">
+                    <label style={{ display: 'flex', alignItems: 'center', fontSize: '14px' }}>
+                      <input
+                        type="checkbox"
+                        checked={localData.enable_split_reply || false}
+                        onChange={(e) => updateNodeData({ enable_split_reply: e.target.checked })}
+                        style={{ marginRight: '8px' }}
+                      />
+                      启用分句回复
+                    </label>
+                    <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                      AI会自动将回复分成2-4个短句，分别发送（更自然的对话体验）
+                    </div>
+                  </div>
+
       <div className="config-field">
                     <label>📏 回复长度限制</label>
         <input
@@ -4351,14 +4366,9 @@ export default function NodeConfig({ node, onUpdate, onClose }: NodeConfigProps)
                                 <label>值</label>
                                 {condition.field === 'db.customer.stage_id' ? (
                                   <select
-                                    value={localData.config?.value || ''}
+                                    value={condition.value || ''}
                                     onChange={(e) => {
-                                      updateNodeData({
-                                        config: {
-                                          ...localData.config,
-                                          value: e.target.value,
-                                        }
-                                      });
+                                      updateCondition(condition.id, { value: e.target.value });
                                     }}
                                   >
                                     <option value="">选择阶段...</option>
